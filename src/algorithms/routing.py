@@ -8,7 +8,6 @@ import numpy as np
 import networkx as nx
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Optional, Set
-from shapely.geometry import LineString
 from ..models.entities import Position, Order, Drone, Map, Building
 import config
 
@@ -186,32 +185,39 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
     def _segment_collides_3d(self, p1: Position, p2: Position,
                                excluded_building_ids: List[Optional[int]] = [],
                                buildings_to_check: Optional[List[Building]] = None) -> bool:
-        """Check if 3D segment intersects any building footprint (polygon) within overlapping height."""
+        """3D 선분 p1-p2가 건물과 충돌하는지 검사합니다.
+           선분의 양 끝점이 속한 건물은 충돌 검사에서 제외합니다.
+        """
 
-        if buildings_to_check is None:
+        if buildings_to_check == None:
             buildings_to_check = self.map.buildings
 
-        line_2d = LineString([(p1.x, p1.z), (p2.x, p2.z)])
-        seg_y_min, seg_y_max = min(p1.y, p2.y), max(p1.y, p2.y)
-
         for building in buildings_to_check:
+            # 도착지 건물이거나, 선분의 끝점이 속한 건물이면 충돌 검사 무시
             flag = False
-            for ex_id in excluded_building_ids:
-                if building.id == ex_id:
+            for excluded_building_id in excluded_building_ids:
+                if building.id == excluded_building_id:
                     flag = True
                     break
-            if flag:
-                continue
+            if flag: continue
 
-            b_y_min, b_y_max = building._vertical_bounds()
-            if seg_y_max < b_y_min or seg_y_min > b_y_max:
-                continue
+            # (기존 충돌 검사 로직)
+            half_w = building.width / 2
+            half_d = building.depth / 2
+            bx, bz = building.position.x, building.position.z
+            rect_x_min, rect_z_min = bx - half_w, bz - half_d
+            rect_x_max, rect_z_max = bx + half_w, bz + half_d
+            p1_inside = (rect_x_min <= p1.x <= rect_x_max) and (rect_z_min <= p1.z <= rect_z_max)
+            p2_inside = (rect_x_min <= p2.x <= rect_x_max) and (rect_z_min <= p2.z <= rect_z_max)
+            intersects_2d = self._segment_intersects_rect_2d(p1.x, p1.z, p2.x, p2.z, rect_x_min, rect_z_min, rect_x_max, rect_z_max)
 
-            poly = building._get_polygon()
-            if poly is not None and line_2d.intersects(poly):
-                return True
+            if not intersects_2d and not p1_inside and not p2_inside: continue
+            seg_y_min, seg_y_max = min(p1.y, p2.y), max(p1.y, p2.y)
+            building_y_min, building_y_max = 0, building.height
+            if seg_y_max >= building_y_min and seg_y_min <= building_y_max:
+                return True # 충돌 발생
 
-        return False
+        return False # 충돌 없음
 
     def _find_path_core(self, start_pos: Position, end_pos: Position) -> List[Tuple[float, float, float]]:
         """기준선 기반 필터링된 그래프에서 A* 경로를 찾아 노드 리스트(튜플)를 반환합니다."""
