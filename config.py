@@ -3,7 +3,7 @@ from pathlib import Path
 
 # Configuration file for DVRP simulation (3D)
 
-RUN_VISUALIZER = True
+RUN_VISUALIZER = False
 SIMULATION_DELTA_TIME = 0.05 # s
 if not RUN_VISUALIZER:
     SIMULATION_TIME = 3600 # s
@@ -33,6 +33,7 @@ BUILDING_SAFETY_MARGIN = 15.0  # Safety distance between buildings (in meters)
 BUILDING_HEIGHT_SCALE = 1  # Multiplier to globally scale real-world building heights
 VISUALIZATION_HEIGHT_SCALE = 1.0  # Multiplier applied only when rendering in Ursina
 CAMERA_MOVE_SPEED = 500.0  # EditorCamera move speed for visualization (units/sec)
+FOOTPRINT_SIMPLIFY_TOLERANCE = 3.0  # >0 to simplify real-map footprints for collision (meters)
 
 # Building type ratios (should add up to <= 1.0)
 STORE_RATIO = 0.3  # 30% of buildings are stores
@@ -51,6 +52,7 @@ ORDER_GENERATION_RATE = 0.0003  # Orders per second (lower to avoid overload)
 MAX_ORDER_DELAY = 300  # Maximum seconds to wait for order
 ROUTE_RETRY_INTERVAL = 60.0  # Seconds to wait before retrying failed routes
 ROUTE_RETRY_MAX_ATTEMPTS = 3  # How many times to retry routing an order
+ROUTE_CONNECTIVITY_CACHE_TTL = 300.0  # seconds to keep failed depot-route connectivity info
 
 # Drone configuration
 DRONE_SPEED = 30  # m/s
