@@ -6,7 +6,7 @@ Main application for Drone Vehicle Routing Problem (DVRP) 3D Simulation
 Author: DVRP Team
 Date: 2025
 """
-
+import cProfile
 import argparse
 import sys
 from typing import Optional
@@ -27,7 +27,7 @@ from src.simulation.simulation_engine import SimulationEngine
 from src.visualization.ursina_visualizer import UrsinaVisualizer
 import config
 
-
+target = None
 class DVRP3DApplication:
     """Main 3D application class for DVRP simulation using Ursina"""
     
@@ -380,7 +380,12 @@ Costs (Won):
             thread.start()
             self.visualizer.run()
         else:
-            self.update_simulation_without_visualizer()
+            t = time.perf_counter()
+            global target
+            target = self.update_simulation_without_visualizer
+            cProfile.run('target()')
+            # self.update_simulation_without_visualizer()
+            print(time.perf_counter() - t)
     
     def cleanup(self):
         """Cleanup resources"""
