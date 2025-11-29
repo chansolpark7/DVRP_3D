@@ -13,6 +13,10 @@ import config
 from ..map import buildings_processing
 from ..models.entities import Building, Map, Position
 from .map_generator import MapGenerator
+try:
+    from shapely.geometry import Polygon as ShapelyPolygon
+except ImportError:
+    ShapelyPolygon = None
 
 
 class RealMapGenerator(MapGenerator):
@@ -26,7 +30,8 @@ class RealMapGenerator(MapGenerator):
         seed: Optional[int] = None,
         geojson_path: Optional[str] = None,
         building_limit: Optional[int] = None,
-        margin_ratio: float = 0.02,
+        margin_ratio: float = 0.05,
+        simplify_tolerance: float = getattr(config, "FOOTPRINT_SIMPLIFY_TOLERANCE", 0.0),
     ):
         """
         Args:
@@ -50,6 +55,7 @@ class RealMapGenerator(MapGenerator):
         self.geojson_path = candidate
         self.building_limit = building_limit
         self.margin_ratio = max(0.0, min(0.2, margin_ratio))
+        self.simplify_tolerance = max(0.0, simplify_tolerance)
 
     def generate_map(
         self,
@@ -257,7 +263,7 @@ class RealMapGenerator(MapGenerator):
         return scaled
 
     def _clean_polygon(self, points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-        """Remove duplicate trailing vertices and collapse near-identical points."""
+        """Normalize footprint: dedup, optional simplify, ensure CCW orientation."""
         if not points:
             return []
 
@@ -268,6 +274,29 @@ class RealMapGenerator(MapGenerator):
 
         if len(cleaned) > 2 and math.dist(cleaned[0], cleaned[-1]) <= 1e-4:
             cleaned.pop()
+
+        # Optional simplification to reduce node/edge count for complex footprints
+        if self.simplify_tolerance > 0 and len(cleaned) > 4 and ShapelyPolygon is not None:
+            try:
+                poly = ShapelyPolygon(cleaned)
+                if poly.is_valid:
+                    simplified = poly.simplify(self.simplify_tolerance, preserve_topology=True)
+                    exterior = list(simplified.exterior.coords) if simplified and simplified.exterior else []
+                    if len(exterior) > 3:
+                        cleaned = [(float(x), float(z)) for x, z, *_ in exterior[:-1]]
+            except Exception:
+                pass
+
+        # Ensure CCW orientation to keep intersection results consistent
+        area2 = 0.0
+        n = len(cleaned)
+        if n >= 3:
+            for i in range(n):
+                x1, z1 = cleaned[i]
+                x2, z2 = cleaned[(i + 1) % n]
+                area2 += x1 * z2 - x2 * z1
+            if area2 < 0:  # clockwise -> reverse
+                cleaned = list(reversed(cleaned))
 
         return cleaned
 

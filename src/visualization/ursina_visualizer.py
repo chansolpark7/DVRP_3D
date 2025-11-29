@@ -164,8 +164,8 @@ class UrsinaVisualizer:
         
         # Setup camera (EditorCamera for free mouse control)
         self.camera = EditorCamera()
-        self.camera.position = (map_width/2, 2300, map_depth/2)
-        self.camera.rotation_x = 90
+        self.camera.position = (map_width/2, 1000, -map_depth/2)
+        self.camera.rotation_x = 30
         camera_speed = getattr(config, "CAMERA_MOVE_SPEED", None)
         if camera_speed:
             self.camera.move_speed = camera_speed
