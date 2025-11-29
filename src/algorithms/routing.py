@@ -175,12 +175,16 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
 
             # 기준선이 건물을 통과하는지 확인
             # destination_building_id는 관련 없으므로 None 전달
-            if self._segment_collides_3d(p1, p2, destination_building_id=None, buildings_to_check=[building]):
+            p1_building = self.map.get_building_containing_point(p1)
+            p2_building = self.map.get_building_containing_point(p2)
+            p1_building_id = p1_building.id if p1_building else None
+            p2_building_id = p2_building.id if p2_building else None
+            if self._segment_collides_3d(p1, p2, excluded_building_ids=[p1_building_id, p2_building_id], buildings_to_check=[building]):
                  relevant_buildings.append(building)
         return relevant_buildings
             
     def _segment_collides_3d(self, p1: Position, p2: Position,
-                               destination_building_id: Optional[int] = None,
+                               excluded_building_ids: List[Optional[int]] = [],
                                buildings_to_check: Optional[List[Building]] = None) -> bool:
         """Check if 3D segment intersects any building footprint (polygon) within overlapping height."""
 
@@ -190,15 +194,13 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
         line_2d = LineString([(p1.x, p1.z), (p2.x, p2.z)])
         seg_y_min, seg_y_max = min(p1.y, p2.y), max(p1.y, p2.y)
 
-        p1_building = self.map.get_building_containing_point(p1)
-        p2_building = self.map.get_building_containing_point(p2)
-        p1_building_id = p1_building.id if p1_building else None
-        p2_building_id = p2_building.id if p2_building else None
-
         for building in buildings_to_check:
-            if (destination_building_id is not None and building.id == destination_building_id) or \
-               (p1_building_id is not None and building.id == p1_building_id) or \
-               (p2_building_id is not None and building.id == p2_building_id):
+            flag = False
+            for ex_id in excluded_building_ids:
+                if building.id == ex_id:
+                    flag = True
+                    break
+            if flag:
                 continue
 
             b_y_min, b_y_max = building._vertical_bounds()
@@ -246,6 +248,11 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
                 if node not in nodes: G.add_node(node, pos=node); nodes.add(node)
 
         node_list = list(nodes)
+        building_ids = []
+        for node in node_list:
+            p = Position(*node)
+            building = self.map.get_building_containing_point(p)
+            building_ids.append(building.id if building else None)
 
         # 간선 추가: 생성된 노드들 사이, 모든 건물과 충돌 검사 (선분 끝점 건물 제외)
         edges_added = 0
@@ -254,9 +261,11 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
                 n2_tuple = node_list[j]
                 p1 = Position(*n1_tuple)
                 p2 = Position(*n2_tuple)
+                p1_building_id = building_ids[i]
+                p2_building_id = building_ids[j]
 
                 # 도착 건물 ID는 dest_id 사용, 선분 끝점 건물은 함수 내부에서 자동으로 제외됨
-                if not self._segment_collides_3d(p1, p2, destination_building_id=dest_id, buildings_to_check=relevant_buildings):
+                if not self._segment_collides_3d(p1, p2, excluded_building_ids=[p1_building_id, p2_building_id, dest_id], buildings_to_check=relevant_buildings):
                     weight = self._euclidean_distance_3d(n1_tuple, n2_tuple)
                     G.add_edge(n1_tuple, n2_tuple, weight=weight)
                     edges_added += 1
@@ -404,11 +413,15 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
         plt.show()
 
     def calculate_route_rec(self, start, end, depth=0) -> List[Position]:
-        if depth > 100: return None
+        if depth > 1000: return None
 
+        start_building = self.map.get_building_containing_point(end)
+        start_building_id = start_building.id if start_building else None
+        end_building = self.map.get_building_containing_point(end)
+        end_building_id = end_building.id if end_building else None
         dest_building = self.map.get_building_containing_point(end)
         dest_id = dest_building.id if dest_building else None
-        is_direct_path_safe = not self._segment_collides_3d(start, end, destination_building_id=dest_id)
+        is_direct_path_safe = not self._segment_collides_3d(start, end, excluded_building_ids=[start_building_id, end_building_id, dest_id])
 
         if is_direct_path_safe:
             return [start, end]
@@ -417,13 +430,21 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
         if not route or len(route) < 2:
             return None
 
+        #print(route)
         full_route = [route[0]]
         for i in range(len(route) - 1):
-            is_step_safe = not self._segment_collides_3d(route[i], route[i+1], destination_building_id=dest_id)
+            a = route[i]
+            b = route[i+1]
+            a_building = self.map.get_building_containing_point(a)
+            a_building_id = a_building.id if a_building else None
+            b_building = self.map.get_building_containing_point(b)
+            b_building_id = b_building.id if b_building else None
+            is_step_safe = not self._segment_collides_3d(a, b, excluded_building_ids=[a_building_id, b_building_id, dest_id])
             if is_step_safe:
-                full_route.append(route[i+1])
+                full_route.append(b)
             else:
-                extended_route = self.calculate_route_rec(route[i], route[i+1], depth + 1)
+                #print(a, b)
+                extended_route = self.calculate_route_rec(a, b, depth + 1)
                 if not extended_route: return None
 
                 full_route.extend(extended_route[1:])
