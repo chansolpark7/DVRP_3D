@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import config
 
-MIN_BUILDING_AREA_SQM = 1.0  # 건물 최소 면적 필터링 기준 (제곱미터)
+MIN_BUILDING_AREA_SQM = 50.0  # 건물 최소 면적 필터링 기준 (제곱미터) 1평=3.3제곱미터
 DEFAULT_FLOOR_HEIGHT = getattr(config, "FLOOR_HEIGHT", 3.0)
 
 
@@ -169,6 +169,15 @@ def preprocess_data(terrain_gdf, building_gdf, spot_elevation_gdf):
         print(f"    - 🚨 경고: '{floor_col}' 컬럼이 없어 높이 추정이 불가능합니다.")
         filtered_building_gdf[floor_col] = 0
 
+    # GRND_FLR가 0층인 건물은 제외합니다.
+    floor_zero_mask = filtered_building_gdf[floor_col] == 0
+    removed_zero = int(floor_zero_mask.sum())
+    if removed_zero > 0:
+        filtered_building_gdf = filtered_building_gdf[~floor_zero_mask].copy()
+        filtered_building_gdf.reset_index(drop=True, inplace=True)
+        filtered_building_gdf['unique_id'] = filtered_building_gdf.index
+        print(f"    - GRND_FLR가 0층인 건물 {removed_zero}개를 제외했습니다.")
+
     if abs_col in filtered_building_gdf.columns:
         filtered_building_gdf[abs_col] = pd.to_numeric(filtered_building_gdf[abs_col], errors='coerce').fillna(0)
     else:
@@ -241,6 +250,16 @@ def preprocess_data(terrain_gdf, building_gdf, spot_elevation_gdf):
             processed_buildings.loc[buildings_to_interpolate.index, 'CONT'] = interpolated_values
 
     processed_buildings = _resolve_heights(processed_buildings)
+
+    # 5-bis. 높이=0 또는 층수=0 건물 제거 (안전장치)
+    floors_now = pd.to_numeric(processed_buildings.get('GRND_FLR', 0), errors='coerce').fillna(0)
+    heights_now = pd.to_numeric(processed_buildings.get('HEIGHT', 0), errors='coerce').fillna(0)
+    keep_mask = (floors_now > 0) & (heights_now > 0)
+    removed_zero_dim = int((~keep_mask).sum())
+    if removed_zero_dim > 0:
+        processed_buildings = processed_buildings[keep_mask].copy()
+        processed_buildings.reset_index(drop=True, inplace=True)
+        print(f"    - 높이=0 또는 GRND_FLR=0 건물 {removed_zero_dim}개를 추가로 제외했습니다.")
 
     # 6. 건물의 절대 높이 계산: 건물의 최종 높이 = 바닥의 해발고도(CONT) + 건물 자체 높이(HEIGHT)
     processed_buildings['ABSOLUTE_HEIGHT'] = processed_buildings['CONT'].fillna(0) + processed_buildings['HEIGHT']

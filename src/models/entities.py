@@ -7,6 +7,7 @@ import random
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from enum import Enum
+from shapely.geometry import Polygon, Point, box
 import config
 
 class EntityType(Enum):
@@ -103,16 +104,53 @@ class Building:
     depth: float  # Size along z-axis
     entity_type: Optional[EntityType] = None
     footprint: Optional[List[Tuple[float, float]]] = None
+
+    def _get_polygon(self, buffer: float = 0.0) -> Optional[Polygon]:
+        """
+        Return a shapely Polygon for the building footprint.
+        Falls back to an axis-aligned rectangle when footprint is missing.
+        """
+        poly = None
+        if self.footprint:
+            poly = Polygon(self.footprint)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+        else:
+            half_w = self.width / 2
+            half_d = self.depth / 2
+            poly = box(
+                self.position.x - half_w,
+                self.position.z - half_d,
+                self.position.x + half_w,
+                self.position.z + half_d,
+            )
+
+        if buffer != 0.0 and poly is not None:
+            poly = poly.buffer(buffer)
+        return poly
+
+    def _vertical_bounds(self) -> Tuple[float, float]:
+        """Return (min_y, max_y) of the building."""
+        half_height = self.height / 2
+        return self.position.y - half_height, self.position.y + half_height
     
     def contains_point(self, pos: Position) -> bool:
-        """Check if a 3D point is inside this building"""
+        """Check if a 3D point is inside this building using polygon footprint when available."""
+        y_min, y_max = self._vertical_bounds()
+        if not (y_min <= pos.y <= y_max):
+            return False
+
+        poly = self._get_polygon()
+        if poly is not None:
+            return poly.covers(Point(pos.x, pos.z))
+
+        # Fallback AABB check (should be rare)
         half_width = self.width / 2
-        half_height = self.height / 2
         half_depth = self.depth / 2
-        
-        return (self.position.x - half_width <= pos.x <= self.position.x + half_width and
-                self.position.y - half_height <= pos.y <= self.position.y + half_height and
-                self.position.z - half_depth <= pos.z <= self.position.z + half_depth)
+        return (
+            self.position.x - half_width <= pos.x <= self.position.x + half_width
+            and self.position.z - half_depth <= pos.z <= self.position.z + half_depth
+        )
     
     def get_center(self) -> Position:
         """Get the center position of the building"""
@@ -123,29 +161,27 @@ class Building:
         return Position(self.position.x, 0, self.position.z)
     
     def collides_with(self, other: 'Building', safety_margin: float = 0.0) -> bool:
-        """Check if this building collides with another building in 3D space
-        
-        Args:
-            other: Another building to check collision with
-            safety_margin: Additional safety distance to maintain between buildings
-        
-        Returns:
-            True if buildings overlap (including safety margin), False otherwise
-        """
+        """Check if buildings overlap using polygon footprints (with optional margin) and height."""
+        y_min_self, y_max_self = self._vertical_bounds()
+        y_min_other, y_max_other = other._vertical_bounds()
+        y_overlap = not (y_max_self < y_min_other or y_max_other < y_min_self)
+
+        poly_self = self._get_polygon(buffer=safety_margin)
+        poly_other = other._get_polygon(buffer=safety_margin)
+
+        if poly_self is not None and poly_other is not None:
+            return y_overlap and poly_self.intersects(poly_other)
+
+        # Fallback AABB overlap if polygons are missing
         half_width_self = self.width / 2
-        half_height_self = self.height / 2
         half_depth_self = self.depth / 2
-        
         half_width_other = other.width / 2
-        half_height_other = other.height / 2
         half_depth_other = other.depth / 2
-        
-        # Check overlap on all three axes (including safety margin)
+
         x_overlap = abs(self.position.x - other.position.x) < (half_width_self + half_width_other + safety_margin)
-        y_overlap = abs(self.position.y - other.position.y) < (half_height_self + half_height_other)
         z_overlap = abs(self.position.z - other.position.z) < (half_depth_self + half_depth_other + safety_margin)
         
-        return x_overlap and y_overlap and z_overlap
+        return y_overlap and x_overlap and z_overlap
 
 
 @dataclass
@@ -401,22 +437,24 @@ class Map:
         self.depots.append(depot)
 
     def get_building_containing_point(self, point: Position) -> Optional[Building]:
-        """주어진 3D 좌표(point)가 포함된 건물을 반환합니다. 없으면 None을 반환합니다."""
+        """Return building containing the given 3D point (polygon-based when available)."""
         for building in self.buildings:
+            y_min, y_max = building._vertical_bounds()
+            if not (y_min <= point.y <= y_max):
+                continue
+
+            poly = building._get_polygon()
+            if poly and poly.covers(Point(point.x, point.z)):
+                return building
+
+            # Fallback AABB check if polygon missing
             half_w = building.width / 2
             half_d = building.depth / 2
-            
-            # 건물의 X, Z 경계 확인 (건물 중심 기준)
-            within_xz = (
-                (building.position.x - half_w <= point.x <= building.position.x + half_w) and
-                (building.position.z - half_d <= point.z <= building.position.z + half_d)
-            )
-            
-            # 건물의 Y(높이) 경계 확인 (바닥은 0)
-            within_y = (0 <= point.y <= building.height)
-            
-            if within_xz and within_y:
-                return building # 점이 건물 내부에 있음
+            if (
+                building.position.x - half_w <= point.x <= building.position.x + half_w
+                and building.position.z - half_d <= point.z <= building.position.z + half_d
+            ):
+                return building
 
         return None # 어떤 건물에도 포함되지 않음
 
