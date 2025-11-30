@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from enum import Enum
 from shapely.geometry import Polygon, Point, box
+from shapely.strtree import STRtree
 import config
 
 class EntityType(Enum):
@@ -104,30 +105,33 @@ class Building:
     depth: float  # Size along z-axis
     entity_type: Optional[EntityType] = None
     footprint: Optional[List[Tuple[float, float]]] = None
+    poly = None
 
     def _get_polygon(self, buffer: float = 0.0) -> Optional[Polygon]:
         """
         Return a shapely Polygon for the building footprint.
         Falls back to an axis-aligned rectangle when footprint is missing.
         """
-        poly = None
-        if self.footprint:
-            poly = Polygon(self.footprint)
-            if not poly.is_valid:
-                poly = poly.buffer(0)
-        else:
-            half_w = self.width / 2
-            half_d = self.depth / 2
-            poly = box(
-                self.position.x - half_w,
-                self.position.z - half_d,
-                self.position.x + half_w,
-                self.position.z + half_d,
-            )
+        if self.poly == None:
+            if self.footprint:
+                self.poly = Polygon(self.footprint)
+                if not self.poly.is_valid:
+                    self.poly = self.poly.buffer(0)
+            else:
+                half_w = self.width / 2
+                half_d = self.depth / 2
+                self.poly = box(
+                    self.position.x - half_w,
+                    self.position.z - half_d,
+                    self.position.x + half_w,
+                    self.position.z + half_d,
+                )
 
-        if buffer != 0.0 and poly is not None:
-            poly = poly.buffer(buffer)
-        return poly
+        if buffer != 0.0 and self.poly is not None:
+            return self.poly.buffer(buffer)
+        else:
+            return self.poly
+        # return self.poly
 
     def _vertical_bounds(self) -> Tuple[float, float]:
         """Return (min_y, max_y) of the building."""
@@ -419,6 +423,8 @@ class Map:
         self.depots: List[Depot] = []
         self.stores: List['Store'] = []  # Store objects on various floors
         self.customers: List['Customer'] = []  # Customer objects on various floors
+        self.tree = None
+        self.poly_to_building = None
     
     def add_building(self, building: Building):
         """Add a building to the map"""
@@ -436,15 +442,32 @@ class Map:
         """Add a depot to the map"""
         self.depots.append(depot)
 
+    def build_tree(self):
+        polys = []
+        for building in self.buildings:
+            polys.append(building._get_polygon())
+        self.tree = STRtree(polys)
+        self.poly_to_building = {
+            poly: building
+            for poly, building in zip(polys, self.buildings)
+        }
+        print(len(polys))
+        print(len(self.poly_to_building))
+
     def get_building_containing_point(self, point: Position) -> Optional[Building]:
         """Return building containing the given 3D point (polygon-based when available)."""
-        for building in self.buildings:
+        p = Point(point.x, point.z)
+        candidate_polys = self.tree.query(p)
+    
+        for poly_index in candidate_polys:
+            building = self.buildings[poly_index]
+
             y_min, y_max = building._vertical_bounds()
             if not (y_min <= point.y <= y_max):
                 continue
 
             poly = building._get_polygon()
-            if poly and poly.covers(Point(point.x, point.z)):
+            if poly and poly.covers(p):
                 return building
 
             # Fallback AABB check if polygon missing

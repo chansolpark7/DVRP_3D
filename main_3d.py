@@ -68,6 +68,7 @@ class DVRP3DApplication:
             print("\n1. 3D 지도 생성 중...")
             map_generator = self._create_map_generator()
             self.map = map_generator.generate_map()
+            self.map.build_tree()
             
             # 2. Setup depots using clustering
             print("\n2. 클러스터링 및 Depot 배치 중...")
@@ -383,7 +384,7 @@ Costs (Won):
             t = time.perf_counter()
             global target
             target = self.update_simulation_without_visualizer
-            cProfile.run('target()')
+            cProfile.run('target()', sort='tottime')
             # self.update_simulation_without_visualizer()
             print(time.perf_counter() - t)
     
