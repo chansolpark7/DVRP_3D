@@ -436,7 +436,7 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
         if not route or len(route) < 2:
             return None
 
-        print(route)
+        #print(route)
         full_route = [route[0]]
         for i in range(len(route) - 1):
             a = route[i]
@@ -449,7 +449,7 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
             if is_step_safe:
                 full_route.append(b)
             else:
-                print(a, b)
+                #print(a, b)
                 extended_route = self.calculate_route_rec(a, b, depth + 1)
                 if not extended_route: return None
 
