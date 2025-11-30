@@ -13,10 +13,9 @@ import config
 from ..map import buildings_processing
 from ..models.entities import Building, Map, Position
 from .map_generator import MapGenerator
-try:
-    from shapely.geometry import Polygon as ShapelyPolygon
-except ImportError:
-    ShapelyPolygon = None
+from shapely.geometry import Polygon
+from shapely.strtree import STRtree
+from shapely.ops import unary_union
 
 
 class RealMapGenerator(MapGenerator):
@@ -72,6 +71,8 @@ class RealMapGenerator(MapGenerator):
         buildings = self._buildings_from_features(features)
         print(f"Loaded {len(buildings)} buildings from GeoJSON")
 
+        for building in buildings:
+            self.map.add_building(building)
         self.assign_entities_to_buildings(buildings, store_ratio, customer_ratio)
         return self.map
 
@@ -103,10 +104,25 @@ class RealMapGenerator(MapGenerator):
         return features
 
     def _buildings_from_features(self, features: Sequence[dict]) -> List[Building]:
+        def find(parent, x):
+            if parent[x] != x:
+                parent[x] = find(parent, parent[x])
+            return parent[x]
+
+        def union(parent, a, b):
+            a = find(parent, a)
+            b = find(parent, b)
+            if a != b:
+                parent[b] = a
+                return True
+            return False
+
         bounds = self._compute_bounds(features)
         scale_x, scale_z, offset_x, offset_z = self._compute_scaling(bounds)
 
-        buildings: List[Building] = []
+        footprints: List[List[Tuple[float, float]]] = []
+        polygons: List[Polygon] = []
+        heights: List[int] = []
 
         for idx, feature in enumerate(features):
             geometry = feature.get("geometry")
@@ -129,24 +145,71 @@ class RealMapGenerator(MapGenerator):
                 # Skip degenerate footprints (zero area) even if HEIGHT exists
                 continue
 
-            xs, zs = zip(*footprint)
+            polygon = Polygon(footprint).buffer(config.BUILDING_SAFETY_MARGIN, resolution=1)
+            height = self._derive_height(feature.get("properties", {}))
+
+            footprints.append(footprint)
+            polygons.append(polygon)
+            heights.append(height)
+
+        n = len(polygons)
+        independent_polygon_num = n
+        parent = [i for i in range(n)]
+        strtree = STRtree(polygons)
+
+        for i, polygon_a in enumerate(polygons):
+            candidates = strtree.query(polygon_a)
+            for j in candidates:
+                if i >= j: continue
+                polygon_b = polygons[j]
+                if polygon_a.intersects(polygon_b):
+                    if union(parent, i, j):
+                        independent_polygon_num  -= 1
+
+        to_new_index: dict[int, int] = dict()
+        for i in range(n):
+            if parent[i] == i:
+                to_new_index[i] = len(to_new_index)
+        print(n, independent_polygon_num, len(to_new_index)) #####
+
+        unioned_polygons: List[List[Polygon]] = [[] for _ in range(independent_polygon_num)]
+        unioned_footprints: List[List[Tuple[float, float]]] = [[] for _ in range(independent_polygon_num)]
+        unioned_heights = [0] * independent_polygon_num
+        for i in range(n):
+            index = to_new_index[find(parent, i)]
+            unioned_polygons[index].append(polygons[i])
+            unioned_footprints[index].append(footprints[i])
+            unioned_heights[index] = max(unioned_heights[index], heights[i])
+
+        for i in range(independent_polygon_num):
+            unioned_polygons[i] = unary_union(unioned_polygons[i])
+            if not isinstance(unioned_polygons[i], Polygon):
+                print('type error')
+                exit()
+
+        
+        buildings: List[Building] = []
+        for i in range(independent_polygon_num):
+            xs, zs = [], []
+            for footprint in unioned_footprints[i]:
+                for x, z in footprint:
+                    xs.append(x)
+                    zs.append(z)
             width = max(max(xs) - min(xs), 5.0)
             depth = max(max(zs) - min(zs), 5.0)
-            centroid_x, centroid_z = self._polygon_centroid(footprint)
-
-            height = self._derive_height(feature.get("properties", {}))
-            position = Position(centroid_x, height / 2, centroid_z)
-
+            centroid_x = sum(xs) / len(xs)
+            centroid_z = sum(zs) / len(zs)
+            position = Position(centroid_x, unioned_heights[i] / 2, centroid_z)
             building = Building(
-                id=idx,
+                id=i,
                 position=position,
                 width=width,
-                height=height,
+                height=unioned_heights[i],
                 depth=depth,
-                footprint=footprint,
+                footprints=unioned_footprints[i],
+                poly=unioned_polygons[i]
             )
             buildings.append(building)
-            self.map.add_building(building)
 
         return buildings
 
@@ -274,18 +337,6 @@ class RealMapGenerator(MapGenerator):
 
         if len(cleaned) > 2 and math.dist(cleaned[0], cleaned[-1]) <= 1e-4:
             cleaned.pop()
-
-        # Optional simplification to reduce node/edge count for complex footprints
-        if self.simplify_tolerance > 0 and len(cleaned) > 4 and ShapelyPolygon is not None:
-            try:
-                poly = ShapelyPolygon(cleaned)
-                if poly.is_valid:
-                    simplified = poly.simplify(self.simplify_tolerance, preserve_topology=True)
-                    exterior = list(simplified.exterior.coords) if simplified and simplified.exterior else []
-                    if len(exterior) > 3:
-                        cleaned = [(float(x), float(z)) for x, z, *_ in exterior[:-1]]
-            except Exception:
-                pass
 
         # Ensure CCW orientation to keep intersection results consistent
         area2 = 0.0

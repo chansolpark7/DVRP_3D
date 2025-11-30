@@ -175,7 +175,7 @@ class DVRP3DApplication:
         print(f"  - Successfully placed Depot 수: {len(depots)}")
         print(f"  - 총 드론 수: {sum(len(depot.drones) for depot in depots)}")
 
-    def _create_map_generator(self) -> MapGenerator:
+    def _create_map_generator(self) -> MapGenerator | RealMapGenerator:
         """Instantiate either the real or synthetic map generator."""
         common_kwargs = dict(
             map_width=config.MAP_WIDTH,

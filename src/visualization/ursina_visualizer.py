@@ -141,6 +141,19 @@ def _build_prism_mesh(points: TypingSequence[Tuple[float, float]], height: float
 
     return Mesh(vertices=vertices, triangles=triangles, mode='triangle')
 
+def merge_meshes(mesh_list):
+    merged = Mesh()
+    v_offset = 0
+    merged.vertices = []
+    merged.triangles = []
+
+    for m in mesh_list:
+        merged.vertices.extend(m.vertices)
+        merged.triangles.extend([t + v_offset for t in m.triangles])
+        v_offset += len(m.vertices)
+
+    merged.generate()
+    return merged
 
 class UrsinaVisualizer:
     """3D visualization for DVRP simulation using Ursina engine"""
@@ -241,15 +254,22 @@ class UrsinaVisualizer:
         if scaled_height <= 0:
             return None
 
-        footprint = getattr(building, "footprint", None)
-        if footprint and len(footprint) >= 3:
+        footprints = getattr(building, "footprints", None)
+        if footprints:
+            mesh_list = []
             center_x = building.position.x
             center_z = building.position.z
-            local_points = [(x - center_x, z - center_z) for x, z in footprint]
-            mesh = _build_prism_mesh(local_points, scaled_height)
-            if mesh:
+
+            for footprint in footprints:
+                local_points = [(x - center_x, z - center_z) for x, z in footprint]
+                mesh = _build_prism_mesh(local_points, scaled_height)
+                if mesh:
+                    mesh_list.append(mesh)
+
+            if mesh_list:
+                merged_mesh = merge_meshes(mesh_list)
                 return Entity(
-                    model=mesh,
+                    model=merged_mesh,
                     position=(center_x, scaled_center_y, center_z),
                     color=bldg_color,
                     alpha=alpha,

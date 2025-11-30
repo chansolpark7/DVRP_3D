@@ -104,34 +104,8 @@ class Building:
     height: float  # Size along y-axis (vertical)
     depth: float  # Size along z-axis
     entity_type: Optional[EntityType] = None
-    footprint: Optional[List[Tuple[float, float]]] = None
-    poly = None
-
-    def _get_polygon(self, buffer: float = 0.0) -> Optional[Polygon]:
-        """
-        Return a shapely Polygon for the building footprint.
-        Falls back to an axis-aligned rectangle when footprint is missing.
-        """
-        if self.poly == None:
-            if self.footprint:
-                self.poly = Polygon(self.footprint)
-                if not self.poly.is_valid:
-                    self.poly = self.poly.buffer(0)
-            else:
-                half_w = self.width / 2
-                half_d = self.depth / 2
-                self.poly = box(
-                    self.position.x - half_w,
-                    self.position.z - half_d,
-                    self.position.x + half_w,
-                    self.position.z + half_d,
-                )
-
-        if buffer != 0.0 and self.poly is not None:
-            return self.poly.buffer(buffer)
-        else:
-            return self.poly
-        # return self.poly
+    footprints: Optional[List[List[Tuple[float, float]]]] = None
+    poly: Optional[Polygon] = None
 
     def _vertical_bounds(self) -> Tuple[float, float]:
         """Return (min_y, max_y) of the building."""
@@ -144,7 +118,7 @@ class Building:
         if not (y_min <= pos.y <= y_max):
             return False
 
-        poly = self._get_polygon()
+        poly = self.poly
         if poly is not None:
             return poly.covers(Point(pos.x, pos.z))
 
@@ -170,8 +144,8 @@ class Building:
         y_min_other, y_max_other = other._vertical_bounds()
         y_overlap = not (y_max_self < y_min_other or y_max_other < y_min_self)
 
-        poly_self = self._get_polygon(buffer=safety_margin)
-        poly_other = other._get_polygon(buffer=safety_margin)
+        poly_self = self.poly
+        poly_other = other.poly
 
         if poly_self is not None and poly_other is not None:
             return y_overlap and poly_self.intersects(poly_other)
@@ -445,14 +419,12 @@ class Map:
     def build_tree(self):
         polys = []
         for building in self.buildings:
-            polys.append(building._get_polygon())
+            polys.append(building.poly)
         self.tree = STRtree(polys)
         self.poly_to_building = {
             poly: building
             for poly, building in zip(polys, self.buildings)
         }
-        print(len(polys))
-        print(len(self.poly_to_building))
 
     def get_building_containing_point(self, point: Position) -> Optional[Building]:
         """Return building containing the given 3D point (polygon-based when available)."""
@@ -466,7 +438,7 @@ class Map:
             if not (y_min <= point.y <= y_max):
                 continue
 
-            poly = building._get_polygon()
+            poly = building.poly
             if poly and poly.covers(p):
                 return building
 

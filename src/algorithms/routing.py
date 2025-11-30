@@ -203,11 +203,84 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
             if seg_y_max < b_y_min or seg_y_min > b_y_max:
                 continue
 
-            poly = building._get_polygon()
+            poly = building.poly
             if poly is not None and line_2d.intersects(poly):
                 return True
 
         return False
+
+    # def _find_path_core(self, start_pos: Position, end_pos: Position) -> List[Tuple[float, float, float]]:
+    #     """기준선 기반 필터링된 그래프에서 A* 경로를 찾아 노드 리스트(튜플)를 반환합니다."""
+    #     if start_pos == end_pos:
+    #         return [(start_pos.x, start_pos.y, start_pos.z)]
+
+    #     G = nx.Graph()
+    #     start_node = (start_pos.x, start_pos.y, start_pos.z)
+    #     end_node = (end_pos.x, end_pos.y, end_pos.z)
+
+    #     G.add_node(start_node, pos=start_node)
+    #     G.add_node(end_node, pos=end_node)
+    #     nodes = {start_node, end_node}
+
+    #     # 도착점이 속한 건물 ID 찾기 (충돌 예외 처리용)
+    #     end_building = self.map.get_building_containing_point(end_pos)
+    #     dest_id = end_building.id if end_building else None
+
+    #     # 관련 건물 필터링 (시작 건물은 여기서 필터링 안 함, 어차피 충돌 무시됨)
+    #     relevant_buildings = self._filter_relevant_buildings(start_pos, end_pos, end_building_id=dest_id)
+    #     relevant_building_ids = set()
+    #     # print(f"       CORE: Found {len(relevant_buildings)} relevant buildings.")
+
+    #     # 관련 건물의 노드 추가 (오프셋 적용됨)
+    #     for building in relevant_buildings:
+    #         relevant_building_ids.add(building.id)
+    #         # 꼭짓점 노드 추가
+    #         vertices = self._get_building_vertices_3d(building) # 오프셋 적용된 노드
+    #         for vertex in vertices:
+    #             node = (vertex.x, vertex.y, vertex.z)
+    #             if node not in nodes: G.add_node(node, pos=node); nodes.add(node)
+    #         # 투영 노드 추가
+    #         projected = self._project_vertices_to_levels(building) # 오프셋 적용된 노드
+    #         for vertex in projected:
+    #             node = (vertex.x, vertex.y, vertex.z)
+    #             if node not in nodes: G.add_node(node, pos=node); nodes.add(node)
+
+    #     node_list = list(nodes)
+    #     building_ids = []
+    #     for node in node_list:
+    #         p = Position(*node)
+    #         building = self.map.get_building_containing_point(p)
+    #         building_ids.append(building.id if building else None)
+    #     print('None count : ', building_ids.count(None) / len(building_ids))
+
+    #     # 간선 추가: 생성된 노드들 사이, 모든 건물과 충돌 검사 (선분 끝점 건물 제외)
+    #     edges_added = 0
+    #     count = 0
+    #     for i, n1_tuple in enumerate(node_list):
+    #         for j in range(i + 1, len(node_list)):
+    #             count += 1
+    #             n2_tuple = node_list[j]
+    #             p1 = Position(*n1_tuple)
+    #             p2 = Position(*n2_tuple)
+    #             p1_building_id = building_ids[i]
+    #             p2_building_id = building_ids[j]
+
+    #             # 도착 건물 ID는 dest_id 사용, 선분 끝점 건물은 함수 내부에서 자동으로 제외됨
+    #             if not self._segment_collides_3d(p1, p2, excluded_building_ids={p1_building_id, p2_building_id, dest_id}, building_ids_to_check=relevant_building_ids):
+    #                 weight = self._euclidean_distance_3d(n1_tuple, n2_tuple)
+    #                 G.add_edge(n1_tuple, n2_tuple, weight=weight)
+    #                 edges_added += 1
+    #     print(f'{count=}')
+
+    #     # A* 경로 탐색
+    #     try:
+    #         def heuristic(u, v): return self._euclidean_distance_3d(u, v)
+    #         path_nodes = nx.astar_path(G, start_node, end_node, heuristic=heuristic, weight='weight')
+
+    #         return path_nodes
+    #     except nx.NetworkXNoPath:
+    #         print(f"⚠️  Routing: No path found")
+    #         return []
 
     def _find_path_core(self, start_pos: Position, end_pos: Position) -> List[Tuple[float, float, float]]:
         """기준선 기반 필터링된 그래프에서 A* 경로를 찾아 노드 리스트(튜플)를 반환합니다."""
@@ -238,48 +311,65 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
             vertices = self._get_building_vertices_3d(building) # 오프셋 적용된 노드
             for vertex in vertices:
                 node = (vertex.x, vertex.y, vertex.z)
-                if node not in nodes: G.add_node(node, pos=node); nodes.add(node)
+                nodes.add(node)
             # 투영 노드 추가
             projected = self._project_vertices_to_levels(building) # 오프셋 적용된 노드
             for vertex in projected:
                 node = (vertex.x, vertex.y, vertex.z)
-                if node not in nodes: G.add_node(node, pos=node); nodes.add(node)
+                nodes.add(node)
 
         node_list = list(nodes)
+        node_to_index = {}
         building_ids = []
-        for node in node_list:
+        for i, node in enumerate(node_list):
+            node_to_index[node] = i
             p = Position(*node)
             building = self.map.get_building_containing_point(p)
             building_ids.append(building.id if building else None)
 
-        # 간선 추가: 생성된 노드들 사이, 모든 건물과 충돌 검사 (선분 끝점 건물 제외)
-        edges_added = 0
-        count = 0
-        for i, n1_tuple in enumerate(node_list):
-            for j in range(i + 1, len(node_list)):
-                count += 1
-                n2_tuple = node_list[j]
-                p1 = Position(*n1_tuple)
-                p2 = Position(*n2_tuple)
-                p1_building_id = building_ids[i]
-                p2_building_id = building_ids[j]
+        n = len(building_ids)
+        dist = [-1] * n
+        connection = [None] * n
+        start = node_to_index[start_node]
+        end = node_to_index[end_node]
+        dist[start] = 0
+        queue = [(0, 0, start)]
 
-                # 도착 건물 ID는 dest_id 사용, 선분 끝점 건물은 함수 내부에서 자동으로 제외됨
-                if not self._segment_collides_3d(p1, p2, excluded_building_ids={p1_building_id, p2_building_id, dest_id}, building_ids_to_check=relevant_building_ids):
-                    weight = self._euclidean_distance_3d(n1_tuple, n2_tuple)
-                    G.add_edge(n1_tuple, n2_tuple, weight=weight)
-                    edges_added += 1
-        print(f'{count=}')
+        count = 0 #
+        while queue:
+            _, d, x = heapq.heappop(queue)
+            if x == end: break
+            if dist[x] != d: continue
+            for y in range(n):
+                if x == y: continue
+                p1 = Position(*node_list[x])
+                p2 = Position(*node_list[y])
+                d_ = self._euclidean_distance_3d(node_list[x], node_list[y]) + d
+                if dist[y] != -1 and d_ >= dist[y]: continue
+                count += 1 #
+                if self._segment_collides_3d(
+                    p1,
+                    p2,
+                    {building_ids[x], building_ids[y], dest_id},
+                    building_ids_to_check=relevant_building_ids):
+                    continue
 
-        # A* 경로 탐색
-        try:
-            def heuristic(u, v): return self._euclidean_distance_3d(u, v)
-            path_nodes = nx.astar_path(G, start_node, end_node, heuristic=heuristic, weight='weight')
+                dist[y] = d_
+                connection[y] = x
+                heapq.heappush(queue, (d_ + self._euclidean_distance_3d(node_list[y], end_node), d_, y))
+        print(f'{count=}') #
 
-            return path_nodes
-        except nx.NetworkXNoPath:
+        x = end
+        if connection[x] == None:
             print(f"⚠️  Routing: No path found")
             return []
+
+        route = [node_list[x]]
+        while x != start:
+            x = connection[x]
+            route.append(node_list[x])
+        route.reverse()
+        return route
 
     def _segment_intersects_rect_2d(self, x1: float, z1: float, x2: float, z2: float,
                                       rect_x_min: float, rect_z_min: float,
