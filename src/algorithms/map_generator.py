@@ -48,7 +48,7 @@ class MapGenerator:
             position = self.map.get_random_valid_position(
                 width, height, depth, 
                 max_attempts=100, 
-                safety_margin=config.BUILDING_SAFETY_MARGIN
+                safety_margin=config.BUILDING_MERGING_MARGIN
             )
             
             if position:

@@ -121,7 +121,7 @@ class RealMapGenerator(MapGenerator):
         scale_x, scale_z, offset_x, offset_z = self._compute_scaling(bounds)
 
         footprints: List[List[Tuple[float, float]]] = []
-        polygons: List[Polygon] = []
+        merging_polygons: List[Polygon] = []
         heights: List[int] = []
 
         for idx, feature in enumerate(features):
@@ -145,49 +145,44 @@ class RealMapGenerator(MapGenerator):
                 # Skip degenerate footprints (zero area) even if HEIGHT exists
                 continue
 
-            polygon = Polygon(footprint).buffer(config.BUILDING_SAFETY_MARGIN, resolution=1)
+            polygon = Polygon(footprint).buffer(config.BUILDING_MERGING_MARGIN, resolution=1)
             height = self._derive_height(feature.get("properties", {}))
 
             footprints.append(footprint)
-            polygons.append(polygon)
+            merging_polygons.append(polygon)
             heights.append(height)
 
-        n = len(polygons)
+        n = len(merging_polygons)
         independent_polygon_num = n
         parent = [i for i in range(n)]
-        strtree = STRtree(polygons)
+        strtree = STRtree(merging_polygons)
 
-        for i, polygon_a in enumerate(polygons):
-            candidates = strtree.query(polygon_a)
+        for i, polygon_a in enumerate(merging_polygons):
+            candidates = strtree.query(polygon_a, predicate="intersects")
             for j in candidates:
                 if i >= j: continue
-                polygon_b = polygons[j]
-                if polygon_a.intersects(polygon_b):
-                    if union(parent, i, j):
-                        independent_polygon_num  -= 1
+                if union(parent, i, j):
+                    independent_polygon_num  -= 1
 
         to_new_index: dict[int, int] = dict()
         for i in range(n):
             if parent[i] == i:
                 to_new_index[i] = len(to_new_index)
-        print(n, independent_polygon_num, len(to_new_index)) #####
 
-        unioned_polygons: List[List[Polygon]] = [[] for _ in range(independent_polygon_num)]
+        polygons: List[List[Polygon]] = [[] for _ in range(independent_polygon_num)]
         unioned_footprints: List[List[Tuple[float, float]]] = [[] for _ in range(independent_polygon_num)]
         unioned_heights = [0] * independent_polygon_num
         for i in range(n):
             index = to_new_index[find(parent, i)]
-            unioned_polygons[index].append(polygons[i])
+            polygons[index].append(merging_polygons[i])
             unioned_footprints[index].append(footprints[i])
             unioned_heights[index] = max(unioned_heights[index], heights[i])
 
+        unioned_polygons: List[Polygon] = [None] * independent_polygon_num
         for i in range(independent_polygon_num):
-            unioned_polygons[i] = unary_union(unioned_polygons[i])
-            if not isinstance(unioned_polygons[i], Polygon):
-                print('type error')
-                exit()
+            unioned_polygons[i] = unary_union(polygons[i])
+            assert isinstance(unioned_polygons[i], Polygon)
 
-        
         buildings: List[Building] = []
         for i in range(independent_polygon_num):
             xs, zs = [], []
@@ -195,11 +190,19 @@ class RealMapGenerator(MapGenerator):
                 for x, z in footprint:
                     xs.append(x)
                     zs.append(z)
-            width = max(max(xs) - min(xs), 5.0)
-            depth = max(max(zs) - min(zs), 5.0)
-            centroid_x = sum(xs) / len(xs)
-            centroid_z = sum(zs) / len(zs)
+            x_max = max(xs)
+            x_min = min(xs)
+            z_max = max(zs)
+            z_min = min(zs)
+            width = x_max - x_min
+            depth = z_max - z_min
+            centroid_x = (x_max + x_min) / 2
+            centroid_z = (z_max + z_min) / 2
             position = Position(centroid_x, unioned_heights[i] / 2, centroid_z)
+            inner_poly = unioned_polygons[i].buffer(config.BUILDING_MERGING_MARGIN).buffer(-config.BUILDING_MERGING_MARGIN).buffer(config.BUILDING_INNER_POLY_MARGIN - config.BUILDING_MERGING_MARGIN, resolution=1)
+            outer_poly = inner_poly.buffer(config.BUILDING_OUTER_POLY_MARGIN - config.BUILDING_INNER_POLY_MARGIN, resolution=1)
+            inner_poly = Polygon(self._clean_polygon(inner_poly.exterior.coords))
+            outer_poly = Polygon(self._clean_polygon(outer_poly.exterior.coords))
             building = Building(
                 id=i,
                 position=position,
@@ -207,8 +210,11 @@ class RealMapGenerator(MapGenerator):
                 height=unioned_heights[i],
                 depth=depth,
                 footprints=unioned_footprints[i],
-                poly=unioned_polygons[i]
+                inner_poly=inner_poly,
+                outer_poly=outer_poly
             )
+            assert isinstance(building.outer_poly, Polygon), building.outer_poly
+            assert isinstance(building.inner_poly, Polygon), building.inner_poly
             buildings.append(building)
 
         return buildings

@@ -88,7 +88,42 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
             levels.append(max_height)
         
         return sorted(set(levels))
-    
+
+    def sample_ring_accumulated(self, coords):
+        MAX_EDGE_STEP = 6
+        sampled = []
+        n = len(coords)
+
+        # 처음 기준점
+        prev_x, prev_z = coords[0]
+        sampled.append((prev_x, prev_z))
+
+        accumulated = 0.0  # 누적 길이
+
+        for i in range(1, n + 1):
+            cur_x, cur_z = coords[i % n]  # 순환
+            dx = cur_x - prev_x
+            dz = cur_z - prev_z
+            seg_len = (dx*dx + dz*dz) ** 0.5
+
+            while accumulated + seg_len >= MAX_EDGE_STEP:
+                remain = MAX_EDGE_STEP - accumulated
+                t = remain / seg_len
+                sx = prev_x + dx * t
+                sz = prev_z + dz * t
+                sampled.append((sx, sz))
+                accumulated = 0.0
+                seg_len -= remain
+                prev_x, prev_z = sx, sz
+                dx = cur_x - prev_x
+                dz = cur_z - prev_z
+
+            accumulated += seg_len
+            prev_x, prev_z = cur_x, cur_z
+
+        return sampled
+
+
     def _get_building_vertices_3d(self, building: Building) -> List[Position]:
         """건물의 꼭짓점에서 약간 바깥쪽으로 오프셋된 노드 위치를 반환합니다.
         
@@ -96,56 +131,79 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
         층별 노드는 _project_vertices_to_levels에서 생성됩니다.
         오프셋은 XZ 평면(수평)으로만 적용됩니다.
         """
+        EPSILON = 1e-5
+        def ccw(a, b, c):
+            return (b[0] - a[0])*(c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+
+        def convex_hull(point): # ccw
+            point = sorted(point)
+            a = []
+            for p in point:
+                while len(a) >= 2 and ccw(a[-2], a[-1], p) <= EPSILON:
+                    a.pop()
+                a.append(p)
+            b = []
+            for p in reversed(point):
+                while len(b) >= 2 and ccw(b[-2], b[-1], p) <= EPSILON:
+                    b.pop()
+                b.append(p)
+            return a[:-1] + b[:-1]
+
+        outer_points = list(map(tuple, building.outer_poly.exterior.coords[:-1]))
+        inner_points = list(map(tuple, building.inner_poly.exterior.coords[:-1]))
+        outer_hull = convex_hull(outer_points)
+        inner_hull = convex_hull(inner_points)
+        n = len(outer_hull)
+        m = len(inner_hull)
+
+        start = 0
+        for j in range(1, m):
+            if ccw(outer_hull[0], inner_hull[start], inner_hull[j]) <= EPSILON:
+                start = j
+
+        i = 0
+        j = start
+        p = outer_hull[i]
+
+        sampled = []
+        sampled.append(p)
+        while True:
+            while ccw(p, inner_hull[j], inner_hull[(j+1) % m]) <= EPSILON and j != (start - 1) % m:
+                j = (j + 1) % m
+
+            while outer_hull[i] == p or ccw(p, inner_hull[j], outer_hull[i]) * ccw(p, inner_hull[j], outer_hull[(i+1)%n]) > EPSILON:
+                i = (i + 1) % n
+            index = outer_points.index(outer_hull[(i+1) % n])
+            while ccw(p, inner_hull[j], outer_points[index]) * ccw(p, inner_hull[j], outer_points[(index-1) % len(outer_points)]) > EPSILON:
+                index = (index - 1) % len(outer_points)
+            
+            A = outer_points[(index-1) % len(outer_points)]
+            B = outer_points[index]
+            I = inner_hull[j]
+            a = A[0] - p[0]
+            b = A[1] - p[1]
+            c = I[0] - p[0]
+            d = I[1] - p[1]
+            e = B[0] - A[0]
+            f = B[1] - A[1]
+            assert c*f - d*e != 0
+
+            alpha = (a*f - b*e) / (c*f - d*e)
+            new_p = (p[0] + alpha * c, p[1] + alpha * d)
+            if p != sampled[0] and ccw(p, new_p, sampled[0]) <= EPSILON:
+                break
+            p = new_p
+            sampled.append(p)
+            i = (i+1) % n
+            if j == (start-1) % m: break
+
         vertices = []
-        cx, cz = building.position.x, building.position.z # 건물 중심 (지면 기준)
-
-        # 지면과 건물 꼭대기에만 노드 생성
-        for dy in [0, building.height]:
-            for sign_x in [-1, 1]:
-                for sign_z in [-1, 1]:
-                    # 원래 꼭짓점 위치
-                    corner_x = cx + sign_x * (building.width / 2)
-                    corner_z = cz + sign_z * (building.depth / 2)
-                    corner_pos = Position(corner_x, dy, corner_z)
-
-                    # 건물 중심에서 꼭짓점으로 향하는 방향 벡터 (XZ 평면, 수평만)
-                    # 같은 높이 레벨에서의 방향 벡터 계산
-                    direction_vector = (corner_pos - Position(cx, dy, cz)).normalize()
-
-                    # 방향 벡터로 NODE_OFFSET만큼 이동 (수평 방향으로만)
-                    offset_pos = corner_pos + direction_vector * NODE_OFFSET
-                    vertices.append(offset_pos)
+        for level in self.height_levels:
+            if level > building.height: break
+            for x, y in sampled:
+                vertices.append(Position(x, level, y, building.id))
 
         return vertices
-    
-    def _project_vertices_to_levels(self, building: Building) -> List[Position]:
-        """건물 바닥면 꼭짓점을 각 높이 레벨로 투영하고 오프셋을 적용합니다.
-        
-        각 건물의 높이 범위 내에서만 노드를 생성합니다.
-        """
-        projected_offset = []
-        cx, cz = building.position.x, building.position.z # 건물 중심 (지면 기준)
-
-        for level in self.height_levels:
-            # 건물 높이를 초과하는 레벨은 무시 (건물 위 허공은 불필요)
-            if level > building.height:
-                continue
-
-            for sign_x in [-1, 1]:
-                for sign_z in [-1, 1]:
-                    # 원래 꼭짓점 위치 (해당 레벨 높이)
-                    corner_x = cx + sign_x * (building.width / 2)
-                    corner_z = cz + sign_z * (building.depth / 2)
-                    corner_pos = Position(corner_x, level, corner_z)
-
-                    # 건물 중심에서 꼭짓점으로 향하는 방향 벡터 (수평)
-                    direction_vector = (corner_pos - Position(cx, level, cz)).normalize()
-
-                    # 방향 벡터로 NODE_OFFSET만큼 이동
-                    offset_pos = corner_pos + direction_vector * NODE_OFFSET
-                    projected_offset.append(offset_pos)
-
-        return projected_offset
 
     def _filter_relevant_buildings(self, p1: Position, p2: Position,
                                    start_building_id: Optional[int] = None,
@@ -160,10 +218,6 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
 
         # 기준선이 건물을 통과하는지 확인
         # destination_building_id는 관련 없으므로 None 전달
-        p1_building = self.map.get_building_containing_point(p1)
-        p2_building = self.map.get_building_containing_point(p2)
-        p1_building_id = p1_building.id if p1_building else None
-        p2_building_id = p2_building.id if p2_building else None
         for building in self.map.buildings:
             if building.id == start_building_id or building.id == end_building_id:
                 continue
@@ -179,7 +233,7 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
                b_max_z < baseline_2d_min_z or b_min_z > baseline_2d_max_z:
                 continue
 
-            if self._segment_collides_3d(p1, p2, excluded_building_ids={p1_building_id, p2_building_id}, building_ids_to_check={building.id}):
+            if self._segment_collides_3d(p1, p2, excluded_building_ids={p1.building_id, p2.building_id}, building_ids_to_check={building.id}):
                  relevant_buildings.append(building)
         return relevant_buildings
             
@@ -203,104 +257,23 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
             if seg_y_max < b_y_min or seg_y_min > b_y_max:
                 continue
 
-            poly = building.poly
+            poly = building.inner_poly
             if poly is not None and line_2d.intersects(poly):
                 return True
 
         return False
 
-    # def _find_path_core(self, start_pos: Position, end_pos: Position) -> List[Tuple[float, float, float]]:
-    #     """기준선 기반 필터링된 그래프에서 A* 경로를 찾아 노드 리스트(튜플)를 반환합니다."""
-    #     if start_pos == end_pos:
-    #         return [(start_pos.x, start_pos.y, start_pos.z)]
-
-    #     G = nx.Graph()
-    #     start_node = (start_pos.x, start_pos.y, start_pos.z)
-    #     end_node = (end_pos.x, end_pos.y, end_pos.z)
-
-    #     G.add_node(start_node, pos=start_node)
-    #     G.add_node(end_node, pos=end_node)
-    #     nodes = {start_node, end_node}
-
-    #     # 도착점이 속한 건물 ID 찾기 (충돌 예외 처리용)
-    #     end_building = self.map.get_building_containing_point(end_pos)
-    #     dest_id = end_building.id if end_building else None
-
-    #     # 관련 건물 필터링 (시작 건물은 여기서 필터링 안 함, 어차피 충돌 무시됨)
-    #     relevant_buildings = self._filter_relevant_buildings(start_pos, end_pos, end_building_id=dest_id)
-    #     relevant_building_ids = set()
-    #     # print(f"       CORE: Found {len(relevant_buildings)} relevant buildings.")
-
-    #     # 관련 건물의 노드 추가 (오프셋 적용됨)
-    #     for building in relevant_buildings:
-    #         relevant_building_ids.add(building.id)
-    #         # 꼭짓점 노드 추가
-    #         vertices = self._get_building_vertices_3d(building) # 오프셋 적용된 노드
-    #         for vertex in vertices:
-    #             node = (vertex.x, vertex.y, vertex.z)
-    #             if node not in nodes: G.add_node(node, pos=node); nodes.add(node)
-    #         # 투영 노드 추가
-    #         projected = self._project_vertices_to_levels(building) # 오프셋 적용된 노드
-    #         for vertex in projected:
-    #             node = (vertex.x, vertex.y, vertex.z)
-    #             if node not in nodes: G.add_node(node, pos=node); nodes.add(node)
-
-    #     node_list = list(nodes)
-    #     building_ids = []
-    #     for node in node_list:
-    #         p = Position(*node)
-    #         building = self.map.get_building_containing_point(p)
-    #         building_ids.append(building.id if building else None)
-    #     print('None count : ', building_ids.count(None) / len(building_ids))
-
-    #     # 간선 추가: 생성된 노드들 사이, 모든 건물과 충돌 검사 (선분 끝점 건물 제외)
-    #     edges_added = 0
-    #     count = 0
-    #     for i, n1_tuple in enumerate(node_list):
-    #         for j in range(i + 1, len(node_list)):
-    #             count += 1
-    #             n2_tuple = node_list[j]
-    #             p1 = Position(*n1_tuple)
-    #             p2 = Position(*n2_tuple)
-    #             p1_building_id = building_ids[i]
-    #             p2_building_id = building_ids[j]
-
-    #             # 도착 건물 ID는 dest_id 사용, 선분 끝점 건물은 함수 내부에서 자동으로 제외됨
-    #             if not self._segment_collides_3d(p1, p2, excluded_building_ids={p1_building_id, p2_building_id, dest_id}, building_ids_to_check=relevant_building_ids):
-    #                 weight = self._euclidean_distance_3d(n1_tuple, n2_tuple)
-    #                 G.add_edge(n1_tuple, n2_tuple, weight=weight)
-    #                 edges_added += 1
-    #     print(f'{count=}')
-
-    #     # A* 경로 탐색
-    #     try:
-    #         def heuristic(u, v): return self._euclidean_distance_3d(u, v)
-    #         path_nodes = nx.astar_path(G, start_node, end_node, heuristic=heuristic, weight='weight')
-
-    #         return path_nodes
-    #     except nx.NetworkXNoPath:
-    #         print(f"⚠️  Routing: No path found")
-    #         return []
-
-    def _find_path_core(self, start_pos: Position, end_pos: Position) -> List[Tuple[float, float, float]]:
+    def _find_path_core(self, start: Position, end: Position) -> List[Position]:
         """기준선 기반 필터링된 그래프에서 A* 경로를 찾아 노드 리스트(튜플)를 반환합니다."""
-        if start_pos == end_pos:
-            return [(start_pos.x, start_pos.y, start_pos.z)]
+        if start == end:
+            return [(start.x, start.y, start.z)]
 
-        G = nx.Graph()
-        start_node = (start_pos.x, start_pos.y, start_pos.z)
-        end_node = (end_pos.x, end_pos.y, end_pos.z)
-
-        G.add_node(start_node, pos=start_node)
-        G.add_node(end_node, pos=end_node)
-        nodes = {start_node, end_node}
+        nodes: List[Position] = [start, end]
 
         # 도착점이 속한 건물 ID 찾기 (충돌 예외 처리용)
-        end_building = self.map.get_building_containing_point(end_pos)
-        dest_id = end_building.id if end_building else None
 
         # 관련 건물 필터링 (시작 건물은 여기서 필터링 안 함, 어차피 충돌 무시됨)
-        relevant_buildings = self._filter_relevant_buildings(start_pos, end_pos, end_building_id=dest_id)
+        relevant_buildings = self._filter_relevant_buildings(start, end, end_building_id=end.building_id)
         relevant_building_ids = set()
         # print(f"       CORE: Found {len(relevant_buildings)} relevant buildings.")
 
@@ -310,64 +283,49 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
             # 꼭짓점 노드 추가
             vertices = self._get_building_vertices_3d(building) # 오프셋 적용된 노드
             for vertex in vertices:
-                node = (vertex.x, vertex.y, vertex.z)
-                nodes.add(node)
-            # 투영 노드 추가
-            projected = self._project_vertices_to_levels(building) # 오프셋 적용된 노드
-            for vertex in projected:
-                node = (vertex.x, vertex.y, vertex.z)
-                nodes.add(node)
+                if vertex in nodes: raise
+                nodes.append(vertex)
 
-        node_list = list(nodes)
-        node_to_index = {}
-        building_ids = []
-        for i, node in enumerate(node_list):
-            node_to_index[node] = i
-            p = Position(*node)
-            building = self.map.get_building_containing_point(p)
-            building_ids.append(building.id if building else None)
-
-        n = len(building_ids)
+        n = len(nodes)
         dist = [-1] * n
         connection = [None] * n
-        start = node_to_index[start_node]
-        end = node_to_index[end_node]
-        dist[start] = 0
-        queue = [(0, 0, start)]
+        dist[0] = 0
+        queue = [(0, 0, 0)]
 
-        count = 0 #
+        visited = [False] * n
         while queue:
             _, d, x = heapq.heappop(queue)
+            if visited[x] and d < dist[x]: raise
+            visited[x] = True
+
             if x == end: break
             if dist[x] != d: continue
             for y in range(n):
                 if x == y: continue
-                p1 = Position(*node_list[x])
-                p2 = Position(*node_list[y])
-                d_ = self._euclidean_distance_3d(node_list[x], node_list[y]) + d
+                p1 = nodes[x]
+                p2 = nodes[y]
+                d_ = self._euclidean_distance_3d(nodes[x], nodes[y]) + d
                 if dist[y] != -1 and d_ >= dist[y]: continue
-                count += 1 #
                 if self._segment_collides_3d(
                     p1,
                     p2,
-                    {building_ids[x], building_ids[y], dest_id},
+                    {p1.building_id, p2.building_id},
                     building_ids_to_check=relevant_building_ids):
                     continue
 
                 dist[y] = d_
                 connection[y] = x
-                heapq.heappush(queue, (d_ + self._euclidean_distance_3d(node_list[y], end_node), d_, y))
-        print(f'{count=}') #
+                heapq.heappush(queue, (d_ + self._euclidean_distance_3d((p2.x, p2.y, p2.z), (end.x, end.y, end.z)), d_, y))
 
-        x = end
+        x = 1
         if connection[x] == None:
             print(f"⚠️  Routing: No path found")
             return []
 
-        route = [node_list[x]]
-        while x != start:
+        route = [nodes[x]]
+        while x != 0:
             x = connection[x]
-            route.append(node_list[x])
+            route.append(nodes[x])
         route.reverse()
         return route
 
@@ -503,38 +461,25 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
         ax.legend(loc='upper right', fontsize=10)
         plt.show()
 
-    def calculate_route_rec(self, start, end, depth=0) -> List[Position]:
+    def calculate_route_rec(self, start: Position, end: Position, depth=0) -> List[Position]:
         if depth > 100: return None
 
-        start_building = self.map.get_building_containing_point(end)
-        start_building_id = start_building.id if start_building else None
-        end_building = self.map.get_building_containing_point(end)
-        end_building_id = end_building.id if end_building else None
-        dest_building = self.map.get_building_containing_point(end)
-        dest_id = dest_building.id if dest_building else None
-        is_direct_path_safe = not self._segment_collides_3d(start, end, excluded_building_ids={start_building_id, end_building_id, dest_id})
-
+        is_direct_path_safe = not self._segment_collides_3d(start, end, excluded_building_ids={start.building_id, end.building_id})
         if is_direct_path_safe:
             return [start, end]
 
-        route = [Position(*p) for p in self._find_path_core(start, end)]
+        route = self._find_path_core(start, end)
         if not route or len(route) < 2:
             return None
 
-        print(depth, len(route))
         full_route = [route[0]]
         for i in range(len(route) - 1):
             a = route[i]
             b = route[i+1]
-            a_building = self.map.get_building_containing_point(a)
-            a_building_id = a_building.id if a_building else None
-            b_building = self.map.get_building_containing_point(b)
-            b_building_id = b_building.id if b_building else None
-            is_step_safe = not self._segment_collides_3d(a, b, excluded_building_ids={a_building_id, b_building_id, dest_id})
+            is_step_safe = not self._segment_collides_3d(a, b, excluded_building_ids={a.building_id, b.building_id, end.building_id})
             if is_step_safe:
                 full_route.append(b)
             else:
-                print(a, b)
                 extended_route = self.calculate_route_rec(a, b, depth + 1)
                 if not extended_route: return None
 
@@ -547,6 +492,10 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
         """점진적 경로 탐색(Incremental Pathfinding)을 사용하여 전체 경로를 계산합니다."""
         full_route = [start]
         segment_targets = waypoints + [end] # 거쳐갈 목표 지점들
+
+        for p in full_route + segment_targets:
+            building = self.map.get_building_containing_point(start)
+            p.building_id = building.id if building else None
 
         current_segment_start = start
 

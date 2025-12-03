@@ -39,6 +39,7 @@ class Position:
     x: float
     y: float
     z: float
+    building_id: Optional[int] = None
     
     def distance_to(self, other: 'Position') -> float:
         """Calculate 3D Euclidean distance to another position"""
@@ -105,7 +106,8 @@ class Building:
     depth: float  # Size along z-axis
     entity_type: Optional[EntityType] = None
     footprints: Optional[List[List[Tuple[float, float]]]] = None
-    poly: Optional[Polygon] = None
+    inner_poly: Optional[Polygon] = None
+    outer_poly: Optional[Polygon] = None
 
     def _vertical_bounds(self) -> Tuple[float, float]:
         """Return (min_y, max_y) of the building."""
@@ -118,7 +120,7 @@ class Building:
         if not (y_min <= pos.y <= y_max):
             return False
 
-        poly = self.poly
+        poly = self.inner_poly
         if poly is not None:
             return poly.covers(Point(pos.x, pos.z))
 
@@ -144,8 +146,8 @@ class Building:
         y_min_other, y_max_other = other._vertical_bounds()
         y_overlap = not (y_max_self < y_min_other or y_max_other < y_min_self)
 
-        poly_self = self.poly
-        poly_other = other.poly
+        poly_self = self.inner_poly
+        poly_other = other.inner_poly
 
         if poly_self is not None and poly_other is not None:
             return y_overlap and poly_self.intersects(poly_other)
@@ -398,7 +400,6 @@ class Map:
         self.stores: List['Store'] = []  # Store objects on various floors
         self.customers: List['Customer'] = []  # Customer objects on various floors
         self.tree = None
-        self.poly_to_building = None
     
     def add_building(self, building: Building):
         """Add a building to the map"""
@@ -419,12 +420,8 @@ class Map:
     def build_tree(self):
         polys = []
         for building in self.buildings:
-            polys.append(building.poly)
+            polys.append(building.inner_poly)
         self.tree = STRtree(polys)
-        self.poly_to_building = {
-            poly: building
-            for poly, building in zip(polys, self.buildings)
-        }
 
     def get_building_containing_point(self, point: Position) -> Optional[Building]:
         """Return building containing the given 3D point (polygon-based when available)."""
@@ -438,17 +435,8 @@ class Map:
             if not (y_min <= point.y <= y_max):
                 continue
 
-            poly = building.poly
+            poly = building.inner_poly
             if poly and poly.covers(p):
-                return building
-
-            # Fallback AABB check if polygon missing
-            half_w = building.width / 2
-            half_d = building.depth / 2
-            if (
-                building.position.x - half_w <= point.x <= building.position.x + half_w
-                and building.position.z - half_d <= point.z <= building.position.z + half_d
-            ):
                 return building
 
         return None # 어떤 건물에도 포함되지 않음

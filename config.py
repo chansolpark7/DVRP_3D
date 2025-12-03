@@ -3,7 +3,7 @@ from pathlib import Path
 
 # Configuration file for DVRP simulation (3D)
 
-RUN_VISUALIZER = False
+RUN_VISUALIZER = True
 SIMULATION_DELTA_TIME = 0.05 # s
 if not RUN_VISUALIZER:
     SIMULATION_TIME = 3600 # s
@@ -29,7 +29,9 @@ BUILDING_MAX_SIZE = 80  # Maximum width/depth
 BUILDING_MIN_HEIGHT = 50  # Minimum building height (Y-axis)
 BUILDING_MAX_HEIGHT = 200  # Maximum building height (Y-axis)
 FLOOR_HEIGHT = 3.0  # Height of each floor in meters
-BUILDING_SAFETY_MARGIN = 0.3  # Safety distance between buildings (in meters)
+BUILDING_MERGING_MARGIN = 0.5
+BUILDING_INNER_POLY_MARGIN = 0.1
+BUILDING_OUTER_POLY_MARGIN = 0.4
 BUILDING_HEIGHT_SCALE = 1  # Multiplier to globally scale real-world building heights
 VISUALIZATION_HEIGHT_SCALE = 1.0  # Multiplier applied only when rendering in Ursina
 CAMERA_MOVE_SPEED = 500.0  # EditorCamera move speed for visualization (units/sec)
