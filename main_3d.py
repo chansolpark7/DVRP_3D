@@ -6,7 +6,7 @@ Main application for Drone Vehicle Routing Problem (DVRP) 3D Simulation
 Author: DVRP Team
 Date: 2025
 """
-
+import cProfile
 import argparse
 import sys
 from typing import Optional
@@ -27,7 +27,7 @@ from src.simulation.simulation_engine import SimulationEngine
 from src.visualization.ursina_visualizer import UrsinaVisualizer
 import config
 
-
+target = None
 class DVRP3DApplication:
     """Main 3D application class for DVRP simulation using Ursina"""
     
@@ -68,6 +68,7 @@ class DVRP3DApplication:
             print("\n1. 3D 지도 생성 중...")
             map_generator = self._create_map_generator()
             self.map = map_generator.generate_map()
+            self.map.build_tree()
             
             # 2. Setup depots using clustering
             print("\n2. 클러스터링 및 Depot 배치 중...")
@@ -174,7 +175,7 @@ class DVRP3DApplication:
         print(f"  - Successfully placed Depot 수: {len(depots)}")
         print(f"  - 총 드론 수: {sum(len(depot.drones) for depot in depots)}")
 
-    def _create_map_generator(self) -> MapGenerator:
+    def _create_map_generator(self) -> MapGenerator | RealMapGenerator:
         """Instantiate either the real or synthetic map generator."""
         common_kwargs = dict(
             map_width=config.MAP_WIDTH,
@@ -380,7 +381,12 @@ Costs (Won):
             thread.start()
             self.visualizer.run()
         else:
-            self.update_simulation_without_visualizer()
+            t = time.perf_counter()
+            global target
+            target = self.update_simulation_without_visualizer
+            cProfile.run('target()', sort='tottime')
+            # self.update_simulation_without_visualizer()
+            print(time.perf_counter() - t)
     
     def cleanup(self):
         """Cleanup resources"""
