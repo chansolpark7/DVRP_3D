@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Main application for Drone Vehicle Routing Problem (DVRP) 3D Simulation
-도심환경에서의 드론 음식 배달 경로 최적화 및 시뮬레이션 (3D Ursina)
+도심환경에서의 드론 음식 배달 경로 최적화 및 시뮬레이션 (3D Panda3D)
 
 Author: DVRP Team
 Date: 2025
@@ -9,9 +9,7 @@ Date: 2025
 import cProfile
 import argparse
 import sys
-from typing import Optional
-from ursina import *
-ursina_time = time
+from typing import Optional, Union
 import time
 import threading
 
@@ -24,12 +22,19 @@ from src.algorithms.real_map_generator import RealMapGenerator
 from src.algorithms.clustering import MixedClustering, ClusterAnalyzer
 from src.algorithms.order_manager import OrderManager
 from src.simulation.simulation_engine import SimulationEngine
-from src.visualization.ursina_visualizer import UrsinaVisualizer
 import config
 
+# Conditional import based on visualizer setting
+if config.RUN_VISUALIZER:
+    from src.visualization.panda3d_visualizer import Panda3DVisualizer
+    from direct.gui.OnscreenText import OnscreenText
+    from panda3d.core import Vec4, TextNode
+
 target = None
+
+
 class DVRP3DApplication:
-    """Main 3D application class for DVRP simulation using Ursina"""
+    """Main 3D application class for DVRP simulation using Panda3D"""
     
     def __init__(
         self,
@@ -48,13 +53,16 @@ class DVRP3DApplication:
         # Core components
         self.map: Optional[Map] = None
         self.simulation_engine: Optional[SimulationEngine] = None
-        self.visualizer: Optional[UrsinaVisualizer] = None
+        self.visualizer: Optional['Panda3DVisualizer'] = None
         self.order_manager: Optional[OrderManager] = None
         
         # UI elements
-        self.ui_panel = None
         self.stats_text = None
         self.help_text = None
+        self.legend_items = []
+        
+        # Key state tracking
+        self._key_states = {}
         
         print("=" * 60)
         print("도심환경에서의 드론 음식 배달 경로 최적화 및 시뮬레이션")
@@ -83,11 +91,12 @@ class DVRP3DApplication:
             self.simulation_engine = SimulationEngine(self.map, self.order_manager)
             
             if config.RUN_VISUALIZER:
-                # 5. Initialize Visualizer (creates Ursina app)
+                # 5. Initialize Visualizer (creates Panda3D app)
+                # Use actual map dimensions (may differ from config for real maps)
                 print("\n5. 3D 시각화 시스템 초기화 중...")
-                self.visualizer = UrsinaVisualizer(
-                    map_width=config.MAP_WIDTH,
-                    map_depth=config.MAP_DEPTH
+                self.visualizer = Panda3DVisualizer(
+                    map_width=self.map.width,
+                    map_depth=self.map.depth
                 )
 
                 # 6. Create map entities in visualizer
@@ -98,6 +107,12 @@ class DVRP3DApplication:
                 print("\n7. UI 패널 생성 중...")
                 self._setup_ui()
                 
+                # 8. Setup input handling
+                self._setup_input()
+                
+                # 9. Add update task
+                self.visualizer.taskMgr.add(self._update_task, 'update_task')
+                
                 print("\n초기화 완료!")
                 print("\n컨트롤:")
                 print("  SPACE: 시뮬레이션 시작/일시정지")
@@ -105,9 +120,10 @@ class DVRP3DApplication:
                 print("  +/-: 시뮬레이션 속도 조절")
                 print("  H: 도움말 표시/숨기기")
                 print("  ESC: 종료")
-                print("  마우스 중간 버튼: 카메라 회전")
-                print("  마우스 오른쪽 버튼: 카메라 팬")
+                print("  마우스 중간/오른쪽 버튼: 카메라 회전")
                 print("  스크롤: 줌")
+                print("  WASD: 카메라 이동")
+                print("  Q/E: 카메라 상하 이동")
             else:
                 self.visualizer = None
             
@@ -175,7 +191,7 @@ class DVRP3DApplication:
         print(f"  - Successfully placed Depot 수: {len(depots)}")
         print(f"  - 총 드론 수: {sum(len(depot.drones) for depot in depots)}")
 
-    def _create_map_generator(self) -> MapGenerator | RealMapGenerator:
+    def _create_map_generator(self) -> Union[MapGenerator, RealMapGenerator]:
         """Instantiate either the real or synthetic map generator."""
         common_kwargs = dict(
             map_width=config.MAP_WIDTH,
@@ -196,68 +212,124 @@ class DVRP3DApplication:
         return MapGenerator(**common_kwargs)
     
     def _setup_ui(self):
-        """Setup UI panels and text"""
+        """Setup UI panels and text using Panda3D"""
+        if not self.visualizer:
+            return
+            
         # Stats panel (top-left)
-        self.stats_text = Text(
+        self.stats_text = OnscreenText(
             text='',
-            position=window.top_left,
-            origin=(-0.5, 0.5),
-            scale=1.2,
-            color=color.white,
-            background=True
+            pos=(-1.3, 0.9),
+            scale=0.05,
+            fg=(1, 1, 1, 1),
+            bg=(0, 0, 0, 0.5),
+            align=TextNode.ALeft,
+            mayChange=True
         )
         
-        # Legend (bottom-left) - Single box with colored items
-        # Create background panel first
-        self.legend_bg = Text(
-            text='                              \n\n\n\n\n',  # Empty text for background
-            position=window.bottom_left + Vec2(0.01, 0.01),
-            origin=(-0.5, -0.5),
-            scale=1,
-            color=color.clear,
-            background=True
-        )
-        
-        # Create individual colored text items on top of background
+        # Legend (bottom-left)
         legend_items = [
-            ('Store Buildings', color.green),
-            ('Customer Buildings', color.red),
-            ('Empty Buildings', color.white),
-            ('Depots', color.blue),
-            ('Drones', color.yellow),
+            ('Store Buildings', (0, 1, 0, 1)),
+            ('Customer Buildings', (1, 0, 0, 1)),
+            ('Empty Buildings', (1, 1, 1, 1)),
+            ('Depots', (0, 0, 1, 1)),
+            ('Drones', (1, 1, 0, 1)),
         ]
         
         self.legend_items = []
-        base_y = 0.11
+        base_y = -0.7
         for i, (label, item_color) in enumerate(legend_items):
-            legend_item = Text(
+            legend_item = OnscreenText(
                 text=label,
-                position=window.bottom_left + Vec2(0.015, base_y - i*0.025),
-                origin=(-0.5, -0.5),
-                scale=0.9,
-                color=item_color,
-                background=False
+                pos=(-1.3, base_y - i * 0.06),
+                scale=0.04,
+                fg=item_color,
+                align=TextNode.ALeft
             )
             self.legend_items.append(legend_item)
         
-        # Help text (top-right)
+        # Help text (hidden by default)
         help_content = """Controls:
 SPACE: Start/Pause
 R: Reset
 +/-: Speed
 H: Toggle Help
-ESC: Quit
-        """
+WASD: Move Camera
+Q/E: Up/Down
+Mouse: Rotate
+Scroll: Zoom
+ESC: Quit"""
         
-        self.help_text = Text(
+        self.help_text = OnscreenText(
             text=help_content,
-            position=window.top_right,
-            origin=(0.5, 0.5),
-            scale=1,
-            color=color.white,
-            background=True,
-            visible=False
+            pos=(1.0, 0.9),
+            scale=0.04,
+            fg=(1, 1, 1, 1),
+            bg=(0, 0, 0, 0.7),
+            align=TextNode.ARight
         )
+        self.help_text.hide()
+    
+    def _setup_input(self):
+        """Setup additional input handling for simulation control"""
+        if not self.visualizer:
+            return
+            
+        # Simulation control keys
+        self.visualizer.accept('space', self._toggle_simulation)
+        self.visualizer.accept('r', self._reset_simulation)
+        self.visualizer.accept('+', self._increase_speed)
+        self.visualizer.accept('=', self._increase_speed)
+        self.visualizer.accept('-', self._decrease_speed)
+        self.visualizer.accept('_', self._decrease_speed)
+        self.visualizer.accept('h', self._toggle_help)
+        
+    def _toggle_simulation(self):
+        """Toggle simulation start/pause"""
+        if not self.simulation_engine:
+            return
+            
+        if self.simulation_engine.is_running and not self.simulation_engine.paused:
+            self.simulation_engine.pause_simulation()
+            print("Simulation paused")
+        elif self.simulation_engine.paused:
+            self.simulation_engine.resume_simulation()
+            print("Simulation resumed")
+        elif not self.simulation_engine.is_running:
+            self.simulation_engine.start_simulation()
+            print("Simulation started")
+            
+    def _reset_simulation(self):
+        """Reset simulation"""
+        if not self.simulation_engine:
+            return
+            
+        self.simulation_engine.reset_simulation()
+        if self.visualizer:
+            self.visualizer.clear_drones()
+        print("Simulation reset")
+        
+    def _increase_speed(self):
+        """Increase simulation speed"""
+        if not self.simulation_engine:
+            return
+        new_speed = min(10.0, self.simulation_engine.speed_multiplier + 0.5)
+        self.simulation_engine.set_speed(new_speed)
+        
+    def _decrease_speed(self):
+        """Decrease simulation speed"""
+        if not self.simulation_engine:
+            return
+        new_speed = max(0.1, self.simulation_engine.speed_multiplier - 0.5)
+        self.simulation_engine.set_speed(new_speed)
+        
+    def _toggle_help(self):
+        """Toggle help text visibility"""
+        if self.help_text:
+            if self.help_text.isHidden():
+                self.help_text.show()
+            else:
+                self.help_text.hide()
     
     def _update_ui(self):
         """Update UI text with current simulation state"""
@@ -294,9 +366,26 @@ Costs (Won):
   Total: {total_cost:,.0f}
 """
         
-        self.stats_text.text = ui_text
+        self.stats_text.setText(ui_text)
+    
+    def _update_task(self, task):
+        """Panda3D task for updating simulation visuals"""
+        if self.simulation_engine and self.visualizer:
+            # Update drone visuals
+            active_drones = self.simulation_engine.get_active_drones()
+            self.visualizer.update_drone_visuals(active_drones)
+            
+            # Update failure markers
+            failure_events = self.simulation_engine.get_failure_events()
+            self.visualizer.update_failure_markers(failure_events)
+            
+            # Update UI
+            self._update_ui()
+            
+        return task.cont
     
     def update_simulation_with_visualizer(self):
+        """Background thread for simulation updates"""
         start_t = time.time()
         count = 1
         while True:
@@ -306,86 +395,33 @@ Costs (Won):
             self.simulation_engine.update_step(config.SIMULATION_DELTA_TIME)
 
     def update_simulation_without_visualizer(self):
+        """Run simulation without visualizer"""
         if self.simulation_engine:
             t = 0
             while config.RUN_VISUALIZER or t < config.SIMULATION_TIME:
                 self.simulation_engine.update_step(config.SIMULATION_DELTA_TIME)
                 t += config.SIMULATION_DELTA_TIME
     
-    def _handle_input(self):
-        """Handle keyboard input"""
-        # Start/Pause simulation
-        if held_keys['space']:
-            if not hasattr(self, '_space_pressed') or not self._space_pressed:
-                self._space_pressed = True
-                if self.simulation_engine.is_running and not self.simulation_engine.paused:
-                    self.simulation_engine.pause_simulation()
-                    print("Simulation paused")
-                elif self.simulation_engine.paused:
-                    self.simulation_engine.resume_simulation()
-                    print("Simulation resumed")
-                elif not self.simulation_engine.is_running:
-                    self.simulation_engine.start_simulation()
-                    print("Simulation started")
-        else:
-            self._space_pressed = False
-        
-        # Reset simulation
-        if held_keys['r']:
-            if not hasattr(self, '_r_pressed') or not self._r_pressed:
-                self._r_pressed = True
-                self.simulation_engine.reset_simulation()
-                self.visualizer.clear_drones()
-                print("Simulation reset")
-        else:
-            self._r_pressed = False
-        
-        # Speed control
-        if held_keys['+'] or held_keys['=']:
-            if not hasattr(self, '_plus_pressed') or not self._plus_pressed:
-                self._plus_pressed = True
-                new_speed = min(10.0, self.simulation_engine.speed_multiplier + 0.5)
-                self.simulation_engine.set_speed(new_speed)
-        else:
-            self._plus_pressed = False
-        
-        if held_keys['-'] or held_keys['_']:
-            if not hasattr(self, '_minus_pressed') or not self._minus_pressed:
-                self._minus_pressed = True
-                new_speed = max(0.1, self.simulation_engine.speed_multiplier - 0.5)
-                self.simulation_engine.set_speed(new_speed)
-        else:
-            self._minus_pressed = False
-        
-        # Toggle help
-        if held_keys['h']:
-            if not hasattr(self, '_h_pressed') or not self._h_pressed:
-                self._h_pressed = True
-                if self.help_text:
-                    self.help_text.visible = not self.help_text.visible
-        else:
-            self._h_pressed = False
-    
     def run(self):
-        """Run the 3D simulation with Ursina"""
+        """Run the 3D simulation with Panda3D"""
         print("\n3D 시뮬레이션 실행 중...")
         
         # Start simulation automatically
         self.simulation_engine.start_simulation()
         
-        # Run Ursina app
-        # The update_simulation() will be called every frame
         if config.RUN_VISUALIZER:
+            # Start simulation update thread
             thread = threading.Thread(target=self.update_simulation_with_visualizer)
             thread.daemon = True
             thread.start()
+            
+            # Run Panda3D main loop
             self.visualizer.run()
         else:
             t = time.perf_counter()
             global target
             target = self.update_simulation_without_visualizer
             cProfile.run('target()', sort='tottime')
-            # self.update_simulation_without_visualizer()
             print(time.perf_counter() - t)
     
     def cleanup(self):
@@ -428,32 +464,6 @@ Costs (Won):
         print("=" * 60)
 
 
-# Global application instance
-app_instance = None
-
-
-def update():
-    """Global update function called by Ursina every frame"""
-
-    # Update simulation engine (one step)
-    if app_instance.simulation_engine:
-        # Update drone visuals
-        active_drones = app_instance.simulation_engine.get_active_drones()
-        app_instance.visualizer.update_drone_visuals(active_drones)
-        failure_events = app_instance.simulation_engine.get_failure_events()
-        app_instance.visualizer.update_failure_markers(failure_events)
-        
-        # Update UI
-        app_instance._update_ui()
-    
-    # Handle keyboard input
-    app_instance._handle_input()
-    
-    # Call visualizer update (for camera controls, etc.)
-    if app_instance.visualizer:
-        app_instance.visualizer.update()
-
-
 def _parse_args():
     parser = argparse.ArgumentParser(description="DVRP 3D simulator")
     parser.add_argument(
@@ -479,8 +489,6 @@ def _parse_args():
 
 def main():
     """Main function"""
-    global app_instance
-    
     args = _parse_args()
 
     MAP_SEED: Optional[int] = config.MAP_SEED

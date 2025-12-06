@@ -70,6 +70,12 @@ class RealMapGenerator(MapGenerator):
         features = self._load_features()
         buildings = self._buildings_from_features(features)
         print(f"Loaded {len(buildings)} buildings from GeoJSON")
+        
+        # Update map dimensions to match actual data bounds
+        if hasattr(self, '_actual_width') and hasattr(self, '_actual_depth'):
+            self.map.width = self._actual_width
+            self.map.depth = self._actual_depth
+            print(f"Map dimensions updated to: {self._actual_width:.1f}m x {self._actual_depth:.1f}m")
 
         for building in buildings:
             self.map.add_building(building)
@@ -246,20 +252,26 @@ class RealMapGenerator(MapGenerator):
         self, bounds: Tuple[float, float, float, float]
     ) -> Tuple[float, float, float, float]:
         min_x, max_x, min_z, max_z = bounds
-        border_x = self.map_width * self.margin_ratio
-        border_z = self.map_depth * self.margin_ratio
-
-        usable_width = max(self.map_width - 2 * border_x, 1.0)
-        usable_depth = max(self.map_depth - 2 * border_z, 1.0)
-
-        scale_x = usable_width / max(max_x - min_x, 1.0)
-        scale_z = usable_depth / max(max_z - min_z, 1.0)
-
-        # Use uniform scaling to avoid footprint distortion
-        uniform_scale = min(scale_x, scale_z)
-        scale_x = scale_z = uniform_scale
-
-        return scale_x, scale_z, border_x, border_z
+        
+        # Use real-world scale (1:1) - no scaling, only offset to origin
+        # This preserves actual meter units from GeoJSON
+        scale_x = 1.0
+        scale_z = 1.0
+        
+        # Small margin from origin
+        margin = 10.0  # 10 meters margin
+        offset_x = margin
+        offset_z = margin
+        
+        # Update map dimensions to match actual data bounds
+        actual_width = max_x - min_x + 2 * margin
+        actual_depth = max_z - min_z + 2 * margin
+        
+        # Store actual dimensions for later use
+        self._actual_width = actual_width
+        self._actual_depth = actual_depth
+        
+        return scale_x, scale_z, offset_x, offset_z
 
     def _derive_height(self, properties: dict) -> float:
         def _as_float(value) -> Optional[float]:

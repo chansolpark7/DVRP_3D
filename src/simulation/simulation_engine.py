@@ -1,6 +1,6 @@
 """
 Real-time simulation engine for drone delivery system (3D)
-Designed to be integrated with Ursina for visualization
+Designed to be integrated with Panda3D for visualization
 """
 
 import time
@@ -13,7 +13,7 @@ import config
 class SimulationEngine:
     """Main simulation engine for the drone delivery system (3D)
     
-    Designed to work with Ursina visualization.
+    Designed to work with Panda3D visualization.
     Call update_step() each frame to advance the simulation.
     """
     
@@ -95,7 +95,7 @@ class SimulationEngine:
     def update_step(self, delta_time: float):
         """Update simulation for one frame
         
-        This method should be called each frame by the external loop (e.g., Ursina).
+        This method should be called each frame by the external loop (e.g., Panda3D).
         
         Args:
             delta_time: Time elapsed since last frame (in seconds)

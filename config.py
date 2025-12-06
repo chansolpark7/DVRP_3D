@@ -22,19 +22,20 @@ MAP_HEIGHT = 1000  # Z-axis (horizontal, called HEIGHT for backward compatibilit
 MAP_DEPTH = 2000  # Z-axis (depth, same as MAP_HEIGHT)
 MAX_MAP_HEIGHT = 500  # Y-axis (maximum altitude for drones)
 
-# Building configuration
+# Building configuration (in meters for realistic scale)
 TOTAL_BUILDINGS = 100
-BUILDING_MIN_SIZE = 20  # Minimum width/depth
-BUILDING_MAX_SIZE = 80  # Maximum width/depth
-BUILDING_MIN_HEIGHT = 50  # Minimum building height (Y-axis)
-BUILDING_MAX_HEIGHT = 200  # Maximum building height (Y-axis)
+BUILDING_MIN_SIZE = 10   # Minimum width/depth (meters) - small building
+BUILDING_MAX_SIZE = 40   # Maximum width/depth (meters) - medium building
+BUILDING_MIN_HEIGHT = 10  # Minimum building height (meters) - ~3 floors
+BUILDING_MAX_HEIGHT = 60  # Maximum building height (meters) - ~20 floors
 FLOOR_HEIGHT = 3.0  # Height of each floor in meters
 BUILDING_MERGING_MARGIN = 0.5
 BUILDING_INNER_POLY_MARGIN = 0.1
 BUILDING_OUTER_POLY_MARGIN = 0.4
 BUILDING_HEIGHT_SCALE = 1  # Multiplier to globally scale real-world building heights
-VISUALIZATION_HEIGHT_SCALE = 1.0  # Multiplier applied only when rendering in Ursina
-CAMERA_MOVE_SPEED = 500.0  # EditorCamera move speed for visualization (units/sec)
+VISUALIZATION_HEIGHT_SCALE = 1.0  # Multiplier applied only when rendering in Panda3D
+VISUALIZATION_SCALE = 1.0  # Global scale multiplier for the entire scene (now using real meters, 1.0 recommended)
+CAMERA_MOVE_SPEED = 500.0  # Camera move speed for visualization (units/sec)
 FOOTPRINT_SIMPLIFY_TOLERANCE = 3.0  # >0 to simplify real-map footprints for collision (meters)
 
 # Building type ratios (should add up to <= 1.0)

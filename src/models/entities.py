@@ -91,7 +91,7 @@ class Position:
 class Building:
     """Represents a building in the 3D urban environment
     
-    In Ursina, y-axis is up (height). Building position represents the center point:
+    In Panda3D, y-axis is up (height). Building position represents the center point:
     - x, z: horizontal center of the building
     - y: vertical center (height/2 from ground)
     - width: size along x-axis
