@@ -191,23 +191,32 @@ class SimulationEngine:
             # Drone is inside a building - determine if it's the destination or accidental
             is_destination = False
             
-            if drone.current_order is not None:
+            # Multi-delivery mode: check all current_orders
+            orders_to_check = []
+            if hasattr(drone, 'current_orders') and drone.current_orders:
+                orders_to_check = drone.current_orders
+            elif drone.current_order is not None:
+                orders_to_check = [drone.current_order]
+            
+            for order in orders_to_check:
                 # Check if this building is the destination (store or customer)
-                if drone.current_order.store_building_id is not None and collided_building.id == drone.current_order.store_building_id:
+                if order.store_building_id is not None and collided_building.id == order.store_building_id:
                     is_destination = True
-                elif drone.current_order.customer_building_id is not None and collided_building.id == drone.current_order.customer_building_id:
+                    break
+                elif order.customer_building_id is not None and collided_building.id == order.customer_building_id:
                     is_destination = True
+                    break
+            
+            # Also check if the target position is in this building (fallback method)
+            if not is_destination and drone.route and len(drone.route) > 0:
+                target_pos = drone.route[0]
+                distance_to_target = drone.position.distance_to(target_pos)
                 
-                # Also check if the target position is in this building (fallback method)
-                if not is_destination and drone.route and len(drone.route) > 0:
-                    target_pos = drone.route[0]
-                    distance_to_target = drone.position.distance_to(target_pos)
-                    
-                    # If very close to target and inside building containing target
-                    if distance_to_target < config.NODE_OFFSET * 2:
-                        target_building = self.map.get_building_containing_point(target_pos)
-                        if target_building is not None and target_building.id == collided_building.id:
-                            is_destination = True
+                # If very close to target and inside building containing target
+                if distance_to_target < config.NODE_OFFSET * 2:
+                    target_building = self.map.get_building_containing_point(target_pos)
+                    if target_building is not None and target_building.id == collided_building.id:
+                        is_destination = True
             
             # Set collision status based on whether it's a destination
             if is_destination:
@@ -447,5 +456,12 @@ class SimulationEngine:
                 drone.current_order = None
                 drone.route = None
                 drone.position = depot.get_center().copy()  # Use 3D depot center position
+                # Multi-delivery reset
+                if hasattr(drone, 'current_orders'):
+                    drone.current_orders = []
+                if hasattr(drone, 'route_waypoint_order_map'):
+                    drone.route_waypoint_order_map = {}
+                if hasattr(drone, '_waypoint_index'):
+                    drone._waypoint_index = 0
         
         print("Simulation reset to initial state")

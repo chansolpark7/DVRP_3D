@@ -16,11 +16,11 @@ from direct.task import Task
 from panda3d.core import ClockObject
 from panda3d.core import (
     NodePath, GeomNode, Geom, GeomVertexFormat, GeomVertexData,
-    GeomVertexWriter, GeomTriangles, Vec3, Vec4, Point3, LVector3f,
+    GeomVertexWriter, GeomTriangles, GeomLines, Vec3, Vec4, Point3, LVector3f,
     AmbientLight, DirectionalLight, TextNode,
     CardMaker, Texture, PNMImage, WindowProperties, AntialiasAttrib,
     TransparencyAttrib, CollisionNode, CollisionBox, CollisionSphere,
-    loadPrcFileData
+    loadPrcFileData, LineSegs
 )
 from direct.gui.OnscreenText import OnscreenText
 
@@ -414,7 +414,11 @@ class Panda3DVisualizer(ShowBase):
         self.depot_nodes: List[NodePath] = []
         self.drone_nodes: Dict[int, NodePath] = {}
         self.drone_labels: Dict[int, NodePath] = {}
+        self.drone_routes: Dict[int, NodePath] = {}  # Route visualization lines
         self.failure_markers: Dict[int, NodePath] = {}
+        
+        # Route visualization settings
+        self.show_routes = True  # Toggle route visualization
         
         # Camera control state (in Panda3D coordinates, auto-scaled to map size)
         self._mouse_pressed = False
@@ -465,6 +469,7 @@ class Panda3DVisualizer(ShowBase):
         # Keyboard
         self.accept('escape', self._on_escape)
         self.accept('h', self._toggle_help)
+        self.accept('v', self.toggle_route_visualization)  # Toggle route lines
         
         # Camera movement keys
         for key in ['w', 'a', 's', 'd', 'q', 'e']:
@@ -634,6 +639,54 @@ class Panda3DVisualizer(ShowBase):
         """Format drone label text"""
         battery_pct = max(0.0, min(1.0, getattr(drone, 'battery_level', 0.0))) * 100
         return f"D{drone.id}: {battery_pct:.0f}%"
+    
+    def _create_route_line(self, drone: Drone, color: Vec4 = None) -> Optional[NodePath]:
+        """Create a line visualization for drone's route
+        
+        Args:
+            drone: Drone with route to visualize
+            color: Line color (default: orange)
+            
+        Returns:
+            NodePath of the route line, or None if no route
+        """
+        if not drone.route or len(drone.route) < 1:
+            return None
+            
+        if color is None:
+            color = Vec4(1.0, 0.5, 0.0, 1.0)  # Orange
+        
+        # Create line segments
+        lines = LineSegs()
+        lines.setThickness(3.0)  # Line thickness
+        lines.setColor(color)
+        
+        # Start from drone's current position
+        start_pos = _sim_pos_to_panda3d(drone.position)
+        lines.moveTo(start_pos[0], start_pos[1], start_pos[2])
+        
+        # Draw lines to each waypoint in the route
+        for waypoint in drone.route:
+            panda_pos = _sim_pos_to_panda3d(waypoint)
+            lines.drawTo(panda_pos[0], panda_pos[1], panda_pos[2])
+        
+        # Create the node
+        line_node = lines.create()
+        line_np = self.scene_root.attachNewNode(line_node)
+        
+        return line_np
+    
+    def toggle_route_visualization(self):
+        """Toggle route visualization on/off"""
+        self.show_routes = not self.show_routes
+        print(f"Route visualization: {'ON' if self.show_routes else 'OFF'}")
+        
+        # Show/hide existing route lines
+        for route_np in self.drone_routes.values():
+            if self.show_routes:
+                route_np.show()
+            else:
+                route_np.hide()
         
     def _get_scaled_height_and_center(self, building: Building) -> Tuple[float, float]:
         """Get scaled height and center Y position for a building (in simulation coords)"""
@@ -887,6 +940,19 @@ class Panda3DVisualizer(ShowBase):
                         text_node.setText(self._format_drone_label(drone))
                 else:
                     label.hide()
+            
+            # Update route visualization
+            if self.show_routes:
+                # Remove old route line
+                if drone.id in self.drone_routes:
+                    self.drone_routes[drone.id].removeNode()
+                    del self.drone_routes[drone.id]
+                
+                # Create new route line if drone has a route
+                if drone.route and len(drone.route) > 0 and is_visible:
+                    route_np = self._create_route_line(drone)
+                    if route_np:
+                        self.drone_routes[drone.id] = route_np
                     
         # Remove inactive drones
         inactive_drone_ids = set(self.drone_nodes.keys()) - active_drone_ids
@@ -898,6 +964,10 @@ class Panda3DVisualizer(ShowBase):
             if drone_id in self.drone_labels:
                 self.drone_labels[drone_id].removeNode()
                 del self.drone_labels[drone_id]
+            
+            if drone_id in self.drone_routes:
+                self.drone_routes[drone_id].removeNode()
+                del self.drone_routes[drone_id]
                 
     def clear_drones(self):
         """Clear all drone entities from the scene"""
@@ -905,9 +975,12 @@ class Panda3DVisualizer(ShowBase):
             node.removeNode()
         for label in self.drone_labels.values():
             label.removeNode()
+        for route in self.drone_routes.values():
+            route.removeNode()
             
         self.drone_nodes.clear()
         self.drone_labels.clear()
+        self.drone_routes.clear()
         self.clear_failure_markers()
         
     def update_failure_markers(self, failure_events: List[Dict]):

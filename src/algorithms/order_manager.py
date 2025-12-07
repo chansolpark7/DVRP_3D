@@ -12,6 +12,7 @@ from ..models.entities import (
 )
 from .clustering import MixedClustering
 from .routing import DroneRouteOptimizer, SimpleRouting, MultiLevelAStarRouting, RouteValidator
+from .multi_delivery.insertion_heuristic import InsertionHeuristicStrategy
 import config
 
 
@@ -165,6 +166,15 @@ class OrderManager:
         print("  Initializing 3D routing...")
         self.route_optimizer = DroneRouteOptimizer(MultiLevelAStarRouting(map_obj, k_levels=3))
         
+        # 다중 배송 전략 초기화
+        self.use_multi_delivery = config.DRONE_CAPACITY > 1
+        if self.use_multi_delivery:
+            print(f"  Multi-delivery mode enabled (capacity: {config.DRONE_CAPACITY})")
+            self.insertion_strategy = InsertionHeuristicStrategy(self.route_optimizer, map_obj)
+        else:
+            print("  Single-delivery mode")
+            self.insertion_strategy = None
+        
         # 시각화 설정
         self.first_route_visualized = False
         self.route_failure_handlers: List[Callable[[Order, str], None]] = []
@@ -215,6 +225,16 @@ class OrderManager:
     def _assign_order_to_depot(self, order: Order, current_time: Optional[float] = None):
         if current_time is None:
             current_time = time.time()
+        
+        # 다중 배송 모드: 삽입 휴리스틱 우선 시도
+        if self.use_multi_delivery and self.insertion_strategy:
+            success = self.insertion_strategy.assign_order(order, current_time)
+            if success:
+                print(f"✓ Order {order.id} assigned via multi-delivery insertion heuristic")
+                return
+            # 실패 시 기존 단일 배송 로직으로 폴백
+            print(f"⚠️ Order {order.id}: Multi-delivery insertion failed, trying single-delivery fallback")
+        
         candidates = self.depot_selector.get_scored_depots(order)
         if not candidates:
             return

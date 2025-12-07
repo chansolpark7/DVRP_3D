@@ -118,6 +118,7 @@ class DVRP3DApplication:
                 print("  SPACE: 시뮬레이션 시작/일시정지")
                 print("  R: 시뮬레이션 리셋")
                 print("  +/-: 시뮬레이션 속도 조절")
+                print("  V: 드론 경로 시각화 ON/OFF")
                 print("  H: 도움말 표시/숨기기")
                 print("  ESC: 종료")
                 print("  마우스 중간/오른쪽 버튼: 카메라 회전")
@@ -253,6 +254,7 @@ class DVRP3DApplication:
 SPACE: Start/Pause
 R: Reset
 +/-: Speed
+V: Toggle Routes
 H: Toggle Help
 WASD: Move Camera
 Q/E: Up/Down

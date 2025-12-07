@@ -5,7 +5,7 @@ Entity classes for the DVRP simulation
 import math
 import random
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from enum import Enum
 from shapely.geometry import Polygon, Point, box
 from shapely.strtree import STRtree
@@ -235,11 +235,20 @@ class Drone:
     depot: Depot
     status: DroneStatus = DroneStatus.IDLE
     current_order: Optional['Order'] = None
+    current_orders: List['Order'] = None  # Multi-delivery: list of assigned orders
     route: List[Position] = None  # List of 3D waypoints
+    route_waypoint_order_map: dict = None  # Maps waypoint index to (Order, visit_type)
     battery_level: float = 1.0  # 0.0 to 1.0
     speed: float = config.DRONE_SPEED  # horizontal speed (units per second)
     vertical_speed: float = config.DRONE_SPEED * 0.5  # vertical speed (units per second)
     collision_status: str = 'none'  # 'none', 'accidental', 'destination_entry'
+    _waypoint_index: int = 0  # Internal counter for tracking current waypoint
+    
+    def __post_init__(self):
+        if self.current_orders is None:
+            self.current_orders = []
+        if self.route_waypoint_order_map is None:
+            self.route_waypoint_order_map = {}
     
     def assign_order(self, order: 'Order'):
         """Assign an order to this drone"""
@@ -261,7 +270,7 @@ class Drone:
     def update_position(self, dt: float):
         """
         경로에 따라 드론 위치를 업데이트하고, 각 경유지에 도달할 때마다
-        스스로 상태를 올바르게 변경합니다. (3D 이동 지원)
+        상태를 올바르게 변경합니다. (3D 이동 지원, 다중 배송 지원)
         """
         # 경로가 없거나 비어있으면 아무것도 하지 않습니다.
         if not self.route:
@@ -277,32 +286,8 @@ class Drone:
 
         # 이미 목표 지점에 있거나 매우 가까운 경우 즉시 다음 waypoint로
         if distance < 0.1:
-            self.route.pop(0)
-            
-            # 상태 전환 (핵심 이벤트만 로그)
-            if self.status == DroneStatus.FLYING:
-                self.status = DroneStatus.DELIVERING
-                print(f"✈️  Drone {self.id}: Arrived at STORE")
-            elif self.status == DroneStatus.DELIVERING:
-                self.status = DroneStatus.RETURNING
-                print(f"📦 Drone {self.id}: Delivered to CUSTOMER")
-            
-            # 경로의 마지막 목적지에 도착했는지 확인
-            if not self.route:
-                if self.status == DroneStatus.RETURNING:
-                    # 배달 완료 처리
-                    if self.current_order:
-                        self.current_order.status = OrderStatus.COMPLETED
-                        print(f"✅ Drone {self.id}: Order {self.current_order.id} COMPLETED")
-                        self.current_order = None
-                    
-                    self.status = DroneStatus.IDLE
+            self._handle_waypoint_arrival()
             return
-        
-        # 목표 지점에 도달할 만큼 가까워졌는지 확인합니다.
-        # 수평/수직 속도를 고려한 효과적인 이동 속도 계산
-        horizontal_distance = math.sqrt(direction.x**2 + direction.z**2)
-        vertical_distance = abs(direction.y)
         
         # 수평 및 수직 이동 속도 계산
         effective_speed = self.speed
@@ -314,35 +299,73 @@ class Drone:
             if distance < move_distance:
                 # 목표 지점에 도착
                 self.position = target.copy()
-                self.route.pop(0)  # 경로에서 현재 위치 제거
-
-                if self.status == DroneStatus.FLYING:
-                    # '가게'에 도착했으므로, 이제 '배달 중' 상태로 변경합니다.
-                    self.status = DroneStatus.DELIVERING
-                    print(f"✈️  Drone {self.id}: Arrived at STORE")
-                
-                elif self.status == DroneStatus.DELIVERING:
-                    # '고객'에게 도착했으므로, 이제 '복귀 중' 상태로 변경합니다.
-                    self.status = DroneStatus.RETURNING
-                    print(f"📦 Drone {self.id}: Delivered to CUSTOMER")
-
-                # 경로의 마지막 목적지에 도착했는지 확인합니다.
-                if not self.route:
-                    if self.status == DroneStatus.RETURNING:
-                        # 배달 완료 처리
-                        if self.current_order:
-                            self.current_order.status = OrderStatus.COMPLETED
-                            print(f"✅ Drone {self.id}: Order {self.current_order.id} COMPLETED")
-                            self.current_order = None
-                        
-                        # 'Depot'에 도착했으므로, '대기' 상태로 전환되어 화면에서 사라집니다.
-                        self.status = DroneStatus.IDLE
+                self._handle_waypoint_arrival()
             else:
                 # 목표 지점을 향해 이동합니다.
                 ratio = move_distance / distance
                 self.position.x += direction.x * ratio
                 self.position.y += direction.y * ratio
                 self.position.z += direction.z * ratio
+
+    def _handle_waypoint_arrival(self):
+        """waypoint 도착 시 상태 처리 (다중 배송 지원)"""
+        if not self.route:
+            return
+            
+        self.route.pop(0)
+        current_waypoint_idx = self._waypoint_index
+        self._waypoint_index += 1
+        
+        # 다중 배송 모드: waypoint_order_map 기반 처리
+        if self.route_waypoint_order_map and current_waypoint_idx in self.route_waypoint_order_map:
+            order, visit_type = self.route_waypoint_order_map[current_waypoint_idx]
+            
+            if visit_type == "store":
+                print(f"✈️  Drone {self.id}: Picked up Order {order.id} at STORE")
+                order.status = OrderStatus.IN_PROGRESS
+                if self.status == DroneStatus.FLYING:
+                    self.status = DroneStatus.DELIVERING
+                    
+            elif visit_type == "customer":
+                print(f"📦 Drone {self.id}: Delivered Order {order.id} to CUSTOMER")
+                order.status = OrderStatus.COMPLETED
+                if order in self.current_orders:
+                    self.current_orders.remove(order)
+        else:
+            # 단일 배송 모드 (기존 로직)
+            if self.status == DroneStatus.FLYING:
+                self.status = DroneStatus.DELIVERING
+                print(f"✈️  Drone {self.id}: Arrived at STORE")
+            elif self.status == DroneStatus.DELIVERING:
+                self.status = DroneStatus.RETURNING
+                print(f"📦 Drone {self.id}: Delivered to CUSTOMER")
+                if self.current_order:
+                    self.current_order.status = OrderStatus.COMPLETED
+        
+        # 경로의 마지막 목적지에 도착했는지 확인
+        if not self.route:
+            self._complete_delivery_route()
+
+    def _complete_delivery_route(self):
+        """배송 경로 완료 처리"""
+        # 다중 배송 모드: 모든 주문 완료 확인
+        if self.current_orders:
+            for order in self.current_orders:
+                if order.status != OrderStatus.COMPLETED:
+                    order.status = OrderStatus.COMPLETED
+            print(f"✅ Drone {self.id}: All {len(self.current_orders)} orders COMPLETED")
+            self.current_orders = []
+        # 단일 배송 모드
+        elif self.current_order:
+            if self.current_order.status != OrderStatus.COMPLETED:
+                self.current_order.status = OrderStatus.COMPLETED
+            print(f"✅ Drone {self.id}: Order {self.current_order.id} COMPLETED")
+            self.current_order = None
+        
+        # 상태 초기화
+        self.status = DroneStatus.IDLE
+        self.route_waypoint_order_map = {}
+        self._waypoint_index = 0
 
     def can_complete_order(self, order: 'Order') -> bool:
         """Return True if current battery can finish depot->store->customer->depot trip."""

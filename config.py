@@ -59,10 +59,20 @@ ROUTE_CONNECTIVITY_CACHE_TTL = 300.0  # seconds to keep failed depot-route conne
 
 # Drone configuration
 DRONE_SPEED = 30  # m/s
-DRONE_CAPACITY = 1  # Number of orders per drone
+DRONE_CAPACITY = 3  # Number of orders per drone (multi-delivery)
 DRONE_BATTERY_LIFE = 25000 # m
 DRONE_CHARGING_SPEED = 0.00455 # /s
 DRONE_BATTERY_CAPACITY = 2 # kWh
+
+# Multi-delivery configuration
+SERVICE_TIME_PER_STOP = 30.0  # Time spent at each stop (seconds)
+CUSTOMER_MAX_WAIT_TIME = 600.0  # Maximum customer wait time (seconds)
+BATTERY_SAFETY_MARGIN = 1.2  # Battery safety margin (20% reserve)
+
+# Insertion heuristic optimization parameters
+INSERTION_MAX_DEPOT_DISTANCE = 2000  # Max distance from depot to store for drone filtering (meters)
+INSERTION_GOOD_ENOUGH_THRESHOLD = 50  # Early termination threshold (cost delta)
+INSERTION_TOP_K_CANDIDATES = 5  # Number of top candidates to fully validate
 
 # Routing visualization
 VISUALIZE_FIRST_ROUTE = False  # Visualize the first delivery route
