@@ -31,6 +31,15 @@ def _ensure_path(path_like: Any) -> Path:
     return path
 
 
+def _standardize_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Column 이름을 대문자로 통일해 KeyError를 방지합니다 (geometry 컬럼은 유지)."""
+    if gdf.empty:
+        return gdf
+    geom_col = gdf.geometry.name if gdf._geometry_column_name in gdf.columns else "geometry"
+    rename_map = {col: col.upper() for col in gdf.columns if col != geom_col}
+    return gdf.rename(columns=rename_map)
+
+
 def _sanitize_geometries(gdf: gpd.GeoDataFrame, min_area: float) -> gpd.GeoDataFrame:
     """Invalid/degenerate polygon 제거 및 buffer(0)로 기하 정리."""
     if gdf.empty:
@@ -108,9 +117,9 @@ def load_data(config):
         return pd.concat(gdf_list, ignore_index=True) if gdf_list else gpd.GeoDataFrame()
 
     # 설정값(config)에 따라 각 데이터 로딩
-    terrain_gdf = _load_and_concat_shp(config["terrain_contour_paths"], 'UTF-8') # 등고선 데이터
-    building_gdf = _load_and_concat_shp(config["building_paths"], 'EUC-KR')   # 건물 데이터 (주로 EUC-KR 인코딩)
-    spot_gdf = _load_and_concat_shp(config["spot_elevation_paths"], 'UTF-8')   # 표고점 데이터
+    terrain_gdf = _standardize_columns(_load_and_concat_shp(config["terrain_contour_paths"], 'UTF-8')) # 등고선 데이터
+    building_gdf = _standardize_columns(_load_and_concat_shp(config["building_paths"], 'EUC-KR'))   # 건물 데이터 (주로 EUC-KR 인코딩)
+    spot_gdf = _standardize_columns(_load_and_concat_shp(config["spot_elevation_paths"], 'UTF-8'))   # 표고점 데이터
 
     
     # 로딩된 데이터의 개수를 출력합니다.
@@ -127,6 +136,12 @@ def load_data(config):
 def preprocess_data(terrain_gdf, building_gdf, spot_elevation_gdf):
     """모든 전처리 과정(좌표계 통일, 필터링, 고도 계산 등)을 수행합니다."""
     print("✅ 2. 데이터 전처리를 시작합니다...")
+
+    if 'CONT' not in terrain_gdf.columns:
+        raise KeyError(f"등고선 데이터에 'CONT' 컬럼이 없습니다. 현재 컬럼: {list(terrain_gdf.columns)}")
+    if not spot_elevation_gdf.empty and 'NUME' not in spot_elevation_gdf.columns:
+        print(f"    - ⚠️  표고점 데이터에 'NUME' 컬럼이 없어 표고점 기반 보간을 건너뜁니다. 현재 컬럼: {list(spot_elevation_gdf.columns)}")
+        spot_elevation_gdf = gpd.GeoDataFrame(geometry=spot_elevation_gdf.geometry, crs=spot_elevation_gdf.crs)
     
     # 1. 좌표계 통일(CRS Unification): 모든 데이터를 하나의 좌표계로 맞춰야 위치를 정확히 비교할 수 있습니다.
     # 기준 좌표계는 등고선 데이터의 좌표계로 설정합니다.
@@ -349,7 +364,7 @@ def visualize_2d(terrain, buildings, config):
     # 5. 그래프의 x, y축 레이블과 제목을 설정합니다.
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
-    ax.set_title('Pohang 2D Map (Latitude/Longitude Axes)')
+    ax.set_title('2D Map (Latitude/Longitude Axes)')
     
     # 6. 완성된 그래프를 이미지 파일로 저장합니다.
     output_path = _ensure_path(config["output_2d_filename"])
@@ -402,7 +417,7 @@ def visualize_3d(terrain, buildings, config):
         fig.colorbar(mappable, ax=ax, shrink=0.6, aspect=10, label='Absolute Height (m)')
         
     # 4. 3D 그래프의 제목과 축 레이블 설정
-    ax.set_title('Pohang 3D Map (Meter-based Axes for True Scale)')
+    ax.set_title('3D Map (Meter-based Axes for True Scale)')
     ax.set_xlabel("X Coordinate (meters)")
     ax.set_ylabel("Y Coordinate (meters)")
     ax.set_zlabel("Z Coordinate (meters, Elevation)")
