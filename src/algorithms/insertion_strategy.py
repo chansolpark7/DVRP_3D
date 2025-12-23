@@ -10,11 +10,12 @@ comparing them fairly using:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional, Union, TYPE_CHECKING
 
 import config
 from ..models.entities import (
     Drone,
+    Motorbike,
     DroneStatus,
     Order,
     OrderStatus,
@@ -24,6 +25,9 @@ from .delivery_types import Route, Visit
 
 if TYPE_CHECKING:
     from .routing import RoutingAlgorithm
+
+# Type alias for vehicle (drone or motorbike)
+Vehicle = Union[Drone, Motorbike]
 
 
 # Optimization parameters
@@ -47,7 +51,21 @@ class RouteEvaluator:
         return route.get_battery_required_estimate()
 
     def check_battery_feasibility(self, route: Route) -> bool:
-        """Return True if the drone has enough battery for the route."""
+        """Return True if the vehicle has enough battery/fuel for the route.
+        
+        Motorbikes have no battery limitation (always returns True).
+        Drones check against battery level.
+        """
+        # Motorbikes have no battery limitation
+        if isinstance(route.drone, Motorbike):
+            # Check range limit if configured
+            range_limit = getattr(config, 'MOTORBIKE_RANGE_LIMIT', None)
+            if range_limit is None:
+                return True
+            required = self.estimate_battery_usage(route)
+            return required <= range_limit
+        
+        # Drone battery check
         required = self.estimate_battery_usage(route)
         available = route.drone.battery_level * config.DRONE_BATTERY_LIFE
         return required <= available
@@ -217,27 +235,39 @@ class InsertionStrategy:
         
         return validated_candidates
 
-    def _collect_candidate_drones(self, order: Order) -> List[Drone]:
-        """Collect all candidate drones (both IDLE and with capacity)."""
-        drones: List[Drone] = []
+    def _collect_candidate_drones(self, order: Order) -> List[Vehicle]:
+        """Collect all candidate vehicles (drones or motorbikes, both IDLE and with capacity)."""
+        vehicles: List[Vehicle] = []
+        simulation_mode = getattr(config, 'SIMULATION_MODE', 'drone')
         
         for depot in self.map.depots:
             # Distance filter: skip depots too far from the order
-            depot_to_store = depot.get_center().distance_to(order.store_position)
+            # Use 2D distance for motorbikes
+            if simulation_mode == "motorbike":
+                depot_to_store = depot.get_center().distance_to_2d(order.store_position)
+            else:
+                depot_to_store = depot.get_center().distance_to(order.store_position)
+            
             if depot_to_store > MAX_DEPOT_DISTANCE:
                 continue
             
-            for drone in depot.drones:
-                if drone.status == DroneStatus.IDLE or self._has_capacity(drone):
-                    drones.append(drone)
+            for vehicle in depot.drones:  # 'drones' field holds either drones or motorbikes
+                if vehicle.status == DroneStatus.IDLE or self._has_capacity(vehicle):
+                    vehicles.append(vehicle)
         
-        return drones
+        return vehicles
 
-    def _has_capacity(self, drone: Drone) -> bool:
-        """Check if drone has capacity for additional orders."""
-        if hasattr(drone, "current_orders") and drone.current_orders:
-            return len(drone.current_orders) < config.DRONE_CAPACITY
-        return drone.current_order is None
+    def _has_capacity(self, vehicle: Vehicle) -> bool:
+        """Check if vehicle has capacity for additional orders."""
+        # Get capacity based on vehicle type
+        if isinstance(vehicle, Motorbike):
+            capacity = getattr(config, 'MOTORBIKE_CAPACITY', 3)
+        else:
+            capacity = config.DRONE_CAPACITY
+        
+        if hasattr(vehicle, "current_orders") and vehicle.current_orders:
+            return len(vehicle.current_orders) < capacity
+        return vehicle.current_order is None
     
     def _calculate_distance_fast(self, start: Position, waypoints: List[Position], end: Position) -> float:
         """Calculate total straight-line distance."""
@@ -346,40 +376,45 @@ class InsertionStrategy:
         order: Order,
         current_time: float,
     ) -> bool:
-        """Apply the selected insertion to the drone."""
-        drone = candidate.drone
+        """Apply the selected insertion to the vehicle (drone or motorbike)."""
+        vehicle = candidate.drone  # Can be either Drone or Motorbike
         route = candidate.route
+        
+        # Determine vehicle type for logging
+        is_motorbike = isinstance(vehicle, Motorbike)
+        vehicle_name = "Motorbike" if is_motorbike else "Drone"
+        vehicle_emoji = "🏍️" if is_motorbike else "🚀"
 
-        # Calculate exact 3D route
+        # Calculate exact route (2D for motorbike, 3D for drone)
         exact_route = self.route_evaluator.calculate_exact_route(route)
         if not exact_route or len(exact_route) < 2:
             return False
 
         # Initialize current_orders if not exists
-        if not hasattr(drone, "current_orders") or drone.current_orders is None:
-            drone.current_orders = []
-        if order not in drone.current_orders:
-            drone.current_orders.append(order)
+        if not hasattr(vehicle, "current_orders") or vehicle.current_orders is None:
+            vehicle.current_orders = []
+        if order not in vehicle.current_orders:
+            vehicle.current_orders.append(order)
 
-        drone.current_order = order
-        order.assigned_drone = drone
+        vehicle.current_order = order
+        order.assigned_drone = vehicle  # Keep field name for compatibility
         order.status = OrderStatus.ASSIGNED
 
         # Build waypoint order map
         waypoint_order_map = self._build_waypoint_order_map(route, exact_route)
 
-        if drone.status == DroneStatus.IDLE:
-            drone.route_waypoint_order_map = waypoint_order_map
-            drone._waypoint_index = 0
-            drone.start_delivery(exact_route)
+        if vehicle.status == DroneStatus.IDLE:
+            vehicle.route_waypoint_order_map = waypoint_order_map
+            vehicle._waypoint_index = 0
+            vehicle.start_delivery(exact_route)
             if candidate.is_new_drone:
-                print(f"🚀 Drone {drone.id}: Starting delivery with {len(drone.current_orders)} order(s)")
+                print(f"{vehicle_emoji} {vehicle_name} {vehicle.id}: Starting delivery with {len(vehicle.current_orders)} order(s)")
             else:
-                print(f"🚀 Drone {drone.id}: Starting multi-delivery with {len(drone.current_orders)} orders")
+                print(f"{vehicle_emoji} {vehicle_name} {vehicle.id}: Starting multi-delivery with {len(vehicle.current_orders)} orders")
         else:
-            drone.route_waypoint_order_map = waypoint_order_map
-            self._update_drone_route(drone, exact_route)
-            print(f"📝 Drone {drone.id}: Updated route, now has {len(drone.current_orders)} orders")
+            vehicle.route_waypoint_order_map = waypoint_order_map
+            self._update_drone_route(vehicle, exact_route)
+            print(f"📝 {vehicle_name} {vehicle.id}: Updated route, now has {len(vehicle.current_orders)} orders")
 
         return True
 
@@ -387,17 +422,28 @@ class InsertionStrategy:
         """Build mapping from waypoint index to (Order, visit_type).
         
         Matches waypoints to visit positions using a two-pass approach:
-        1. First pass: Find exact or very close matches (within 1m)
+        1. First pass: Find exact or very close matches (within threshold)
         2. Second pass: For unmatched visits, find the closest waypoint
+        
+        Uses 2D distance (x-z plane) for matching to handle motorbike routes
+        where waypoints are at y=0 but store/customer positions have height.
         
         Skips index 0 (start position/depot) to prevent triggering service time
         at the depot when starting a delivery.
         """
         mapping = {}
-        # Very tight threshold for exact matches
-        exact_threshold = 1.0
-        # Fallback threshold for close matches
-        fallback_threshold = max(config.NODE_OFFSET, 3.0)
+        
+        # Check if this is a motorbike (route waypoints at y=0)
+        is_motorbike = isinstance(route.drone, Motorbike)
+        
+        # Use different thresholds for motorbike (2D matching needs more tolerance)
+        # Motorbike detour waypoints can be significantly offset from building centers
+        if is_motorbike:
+            exact_threshold = 10.0  # Increased from 5.0 for detour waypoints
+            fallback_threshold = 50.0  # Increased from 15.0 to handle large detours
+        else:
+            exact_threshold = 1.0
+            fallback_threshold = max(config.NODE_OFFSET, 3.0)
         
         # Get depot position to exclude it from matching
         depot_pos = route.depot_position
@@ -420,10 +466,18 @@ class InsertionStrategy:
                     continue
                 
                 # Skip waypoints that are very close to depot (return path)
-                if depot_pos and waypoint.distance_to(depot_pos) < exact_threshold:
-                    continue
+                # Use 2D distance for depot check too
+                if depot_pos:
+                    depot_dist = waypoint.distance_to_2d(depot_pos) if is_motorbike else waypoint.distance_to(depot_pos)
+                    if depot_dist < exact_threshold:
+                        continue
                 
-                dist = waypoint.distance_to(visit.position)
+                # Use 2D distance for motorbike, 3D for drone
+                if is_motorbike:
+                    dist = waypoint.distance_to_2d(visit.position)
+                else:
+                    dist = waypoint.distance_to(visit.position)
+                    
                 if dist < best_dist:
                     best_dist = dist
                     best_idx = idx
@@ -446,10 +500,18 @@ class InsertionStrategy:
                     continue
                 if idx in mapping:
                     continue
-                if depot_pos and waypoint.distance_to(depot_pos) < exact_threshold:
-                    continue
+                    
+                if depot_pos:
+                    depot_dist = waypoint.distance_to_2d(depot_pos) if is_motorbike else waypoint.distance_to(depot_pos)
+                    if depot_dist < exact_threshold:
+                        continue
                 
-                dist = waypoint.distance_to(visit.position)
+                # Use 2D distance for motorbike, 3D for drone
+                if is_motorbike:
+                    dist = waypoint.distance_to_2d(visit.position)
+                else:
+                    dist = waypoint.distance_to(visit.position)
+                    
                 if dist < best_dist:
                     best_dist = dist
                     best_idx = idx

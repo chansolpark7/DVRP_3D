@@ -9,7 +9,7 @@ from ..models.entities import (
     Order, Depot, Drone, OrderStatus, DroneStatus, Position, Store, Customer
 )
 from .clustering import MixedClustering
-from .routing import MultiLevelAStarRouting
+from .routing import MultiLevelAStarRouting, MotorbikeRouting
 from .insertion_strategy import InsertionStrategy
 import config
 
@@ -85,12 +85,21 @@ class OrderManager:
         self.route_connectivity_cache: Dict[Tuple[int, int, int], Dict[str, float]] = {}
         self.connectivity_cache_ttl = getattr(config, "ROUTE_CONNECTIVITY_CACHE_TTL", 300.0)
         
-        # Initialize routing algorithm
-        print("  Initializing 3D routing...")
-        self.routing_algorithm = MultiLevelAStarRouting(map_obj, k_levels=3)
+        # Check simulation mode
+        self.simulation_mode = getattr(config, 'SIMULATION_MODE', 'drone')
+        
+        # Initialize routing algorithm based on simulation mode
+        if self.simulation_mode == "motorbike":
+            print("  Initializing 2D ground-level routing for motorbikes...")
+            self.routing_algorithm = MotorbikeRouting(map_obj)
+            vehicle_capacity = getattr(config, 'MOTORBIKE_CAPACITY', 3)
+            print(f"  Unified insertion strategy enabled (motorbike capacity: {vehicle_capacity})")
+        else:
+            print("  Initializing 3D routing for drones...")
+            self.routing_algorithm = MultiLevelAStarRouting(map_obj, k_levels=3)
+            print(f"  Unified insertion strategy enabled (drone capacity: {config.DRONE_CAPACITY})")
         
         # Initialize unified insertion strategy
-        print(f"  Unified insertion strategy enabled (drone capacity: {config.DRONE_CAPACITY})")
         self.insertion_strategy = InsertionStrategy(self.routing_algorithm, map_obj)
         
         self.route_failure_handlers: List[Callable[[Order, str], None]] = []

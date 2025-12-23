@@ -340,13 +340,29 @@ ESC: Quit"""
         
         state = self.simulation_engine.get_simulation_state()
         stats = state['stats']
-        fixed_cost = (stats['depot_cost'] + stats['drone_cost']) * config.FIXED_COST_WEIGHT
-        variable_cost = stats['charging_cost'] + stats['penalty_cost']
-        total_cost = fixed_cost + variable_cost
         
+        # Handle both drone and motorbike modes
+        simulation_mode = getattr(config, 'SIMULATION_MODE', 'drone')
+        is_motorbike = simulation_mode == "motorbike"
+        
+        if is_motorbike:
+            vehicle_cost = stats.get('vehicle_cost', 0)
+            fixed_cost = (stats['depot_cost'] + vehicle_cost) * config.FIXED_COST_WEIGHT
+            variable_cost = stats.get('fuel_cost', 0) + stats.get('labor_cost', 0) + stats['penalty_cost']
+            total_distance = stats.get('total_vehicle_distance', 0)
+            mode_name = "Motorbike"
+        else:
+            drone_cost = stats.get('drone_cost', 0)
+            fixed_cost = (stats['depot_cost'] + drone_cost) * config.FIXED_COST_WEIGHT
+            variable_cost = stats.get('charging_cost', 0) + stats['penalty_cost']
+            total_distance = stats.get('total_drone_distance', 0)
+            mode_name = "Drone"
+        
+        total_cost = fixed_cost + variable_cost
         status = "RUNNING" if state['is_running'] else "PAUSED"
         
-        ui_text = f"""DVRP 3D Simulation
+        if is_motorbike:
+            ui_text = f"""DVRP 3D Simulation ({mode_name})
 Status: {status}
 Speed: {state['speed_multiplier']:.1f}x
 Time: {state['simulation_time']:.1f}s
@@ -359,11 +375,34 @@ Stats:
   Deliveries: {stats['total_deliveries_completed']}
   Fails: {stats.get('failed_orders', 0)}
   Avg Time: {stats['average_delivery_time']:.1f}s
-  Distance: {stats['total_drone_distance']:.1f}m
+  Distance: {total_distance:.1f}m
 
 Costs (Won):
   Fixed: {fixed_cost:,.0f}
-  Charging: {stats['charging_cost']:,.0f}
+  Fuel: {stats.get('fuel_cost', 0):,.0f}
+  Labor: {stats.get('labor_cost', 0):,.0f}
+  Penalty: {stats['penalty_cost']:,.0f}
+  Total: {total_cost:,.0f}
+"""
+        else:
+            ui_text = f"""DVRP 3D Simulation ({mode_name})
+Status: {status}
+Speed: {state['speed_multiplier']:.1f}x
+Time: {state['simulation_time']:.1f}s
+
+Orders:
+  Active: {state['active_orders']}
+  Completed: {state['completed_orders']}
+  
+Stats:
+  Deliveries: {stats['total_deliveries_completed']}
+  Fails: {stats.get('failed_orders', 0)}
+  Avg Time: {stats['average_delivery_time']:.1f}s
+  Distance: {total_distance:.1f}m
+
+Costs (Won):
+  Fixed: {fixed_cost:,.0f}
+  Charging: {stats.get('charging_cost', 0):,.0f}
   Penalty: {stats['penalty_cost']:,.0f}
   Total: {total_cost:,.0f}
 """
@@ -373,9 +412,9 @@ Costs (Won):
     def _update_task(self, task):
         """Panda3D task for updating simulation visuals"""
         if self.simulation_engine and self.visualizer:
-            # Update drone visuals
-            active_drones = self.simulation_engine.get_active_drones()
-            self.visualizer.update_drone_visuals(active_drones)
+            # Update vehicle visuals (only active vehicles)
+            active_vehicles = self.simulation_engine.get_active_drones()
+            self.visualizer.update_drone_visuals(active_vehicles)
             
             # Update failure markers
             failure_events = self.simulation_engine.get_failure_events()
@@ -439,14 +478,26 @@ Costs (Won):
         """Print final simulation statistics"""
         stats = self.simulation_engine.get_simulation_state()['stats']
         
+        # Handle both drone and motorbike modes
+        simulation_mode = getattr(config, 'SIMULATION_MODE', 'drone')
+        is_motorbike = simulation_mode == "motorbike"
+        
         print("\n" + "=" * 60)
-        print("최종 시뮬레이션 결과")
+        if is_motorbike:
+            print("최종 시뮬레이션 결과 (오토바이 모드)")
+        else:
+            print("최종 시뮬레이션 결과 (드론 모드)")
         print("=" * 60)
         print(f"총 시뮬레이션 시간: {stats['simulation_duration']:.1f}초")
         print(f"총 처리된 주문: {stats['total_orders_processed']}")
         print(f"완료된 배달: {stats['total_deliveries_completed']}")
         print(f"평균 배달 시간: {stats['average_delivery_time']:.1f}초")
-        print(f"총 드론 이동 거리: {stats['total_drone_distance']:.1f}m")
+        
+        if is_motorbike:
+            print(f"총 오토바이 이동 거리: {stats.get('total_vehicle_distance', 0):.1f}m")
+        else:
+            print(f"총 드론 이동 거리: {stats.get('total_drone_distance', 0):.1f}m")
+        
         print(f"실패한 주문: {stats.get('failed_orders', 0)}")
         
         if stats['total_orders_processed'] > 0:
@@ -455,13 +506,28 @@ Costs (Won):
         
         print("고정비")
         print(f"depot 비용: {stats['depot_cost']: ,.2f}원")
-        print(f"드론 이용: {stats['drone_cost']: ,.2f}원\n")
+        
+        if is_motorbike:
+            print(f"오토바이 구매비: {stats.get('vehicle_cost', 0): ,.2f}원\n")
+            print("변동비")
+            print(f"연료 비용: {stats.get('fuel_cost', 0): ,.2f}원")
+            print(f"인건비: {stats.get('labor_cost', 0): ,.2f}원")
+            print(f"패널티 비용: {stats['penalty_cost']: ,.2f}원\n")
+            
+            vehicle_cost = stats.get('vehicle_cost', 0)
+            fixed_cost = (stats['depot_cost'] + vehicle_cost) * config.FIXED_COST_WEIGHT
+            variable_cost = stats.get('fuel_cost', 0) + stats.get('labor_cost', 0) + stats['penalty_cost']
+        else:
+            print(f"드론 구매비: {stats.get('drone_cost', 0): ,.2f}원\n")
+            print("변동비")
+            print(f"충전 비용: {stats.get('charging_cost', 0): ,.2f}원")
+            print(f"패널티 비용: {stats['penalty_cost']: ,.2f}원\n")
+            
+            drone_cost = stats.get('drone_cost', 0)
+            fixed_cost = (stats['depot_cost'] + drone_cost) * config.FIXED_COST_WEIGHT
+            variable_cost = stats.get('charging_cost', 0) + stats['penalty_cost']
 
-        print("변동비")
-        print(f"충전 비용: {stats['charging_cost']: ,.2f}원")
-        print(f"패널티 비용: {stats['penalty_cost']: ,.2f}원\n")
-
-        print(f"총 비용: {(stats['depot_cost'] + stats['drone_cost']) * config.FIXED_COST_WEIGHT + stats['charging_cost'] + stats['penalty_cost']: ,.2f}원")
+        print(f"총 비용: {fixed_cost + variable_cost: ,.2f}원")
         
         print("=" * 60)
 

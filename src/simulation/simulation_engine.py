@@ -1,13 +1,16 @@
 """
-Real-time simulation engine for drone delivery system (3D)
+Real-time simulation engine for drone/motorbike delivery system (3D)
 Designed to be integrated with Panda3D for visualization
 """
 
 import time
-from typing import List, Dict, Optional, Callable
-from ..models.entities import Drone, Order, OrderStatus, DroneStatus
+from typing import List, Dict, Optional, Callable, Union
+from ..models.entities import Drone, Motorbike, Order, OrderStatus, DroneStatus
 from ..algorithms.order_manager import OrderManager
 import config
+
+# Type alias for vehicle
+Vehicle = Union[Drone, Motorbike]
 
 
 class SimulationEngine:
@@ -30,19 +33,38 @@ class SimulationEngine:
         # Event system (simple callback-based)
         self.event_handlers = {}
 
-        # Statistics
-        self.stats = {
-            'total_orders_processed': 0,
-            'total_deliveries_completed': 0,
-            'average_delivery_time': 0.0,
-            'total_drone_distance': 0.0,
-            'simulation_duration': 0.0,
-            'depot_cost': config.TOTAL_DEPOTS * config.DEPOT_COST,
-            'drone_cost': config.TOTAL_DEPOTS * config.DRONES_PER_DEPOT * config.DRONE_COST,
-            'charging_cost': 0,
-            'penalty_cost': 0,
-            'failed_orders': 0
-        }
+        # Determine simulation mode and vehicle type
+        self.simulation_mode = getattr(config, 'SIMULATION_MODE', 'drone')
+        
+        # Statistics - initialize based on simulation mode
+        if self.simulation_mode == "motorbike":
+            vehicle_cost = getattr(config, 'MOTORBIKE_COST', 3_000_000)
+            self.stats = {
+                'total_orders_processed': 0,
+                'total_deliveries_completed': 0,
+                'average_delivery_time': 0.0,
+                'total_vehicle_distance': 0.0,  # Total distance traveled
+                'simulation_duration': 0.0,
+                'depot_cost': config.TOTAL_DEPOTS * config.DEPOT_COST,
+                'vehicle_cost': config.TOTAL_DEPOTS * config.DRONES_PER_DEPOT * vehicle_cost,
+                'fuel_cost': 0.0,  # Accumulated fuel cost
+                'labor_cost': 0.0,  # Labor cost based on working hours
+                'penalty_cost': 0,
+                'failed_orders': 0
+            }
+        else:
+            self.stats = {
+                'total_orders_processed': 0,
+                'total_deliveries_completed': 0,
+                'average_delivery_time': 0.0,
+                'total_drone_distance': 0.0,
+                'simulation_duration': 0.0,
+                'depot_cost': config.TOTAL_DEPOTS * config.DEPOT_COST,
+                'drone_cost': config.TOTAL_DEPOTS * config.DRONES_PER_DEPOT * config.DRONE_COST,
+                'charging_cost': 0,
+                'penalty_cost': 0,
+                'failed_orders': 0
+            }
         self.failed_orders: Dict[int, Dict] = {}
         self.retry_interval = getattr(config, "ROUTE_RETRY_INTERVAL", 60.0)
         self.retry_max_attempts = getattr(config, "ROUTE_RETRY_MAX_ATTEMPTS", 3)
@@ -132,48 +154,71 @@ class SimulationEngine:
             traceback.print_exc()
     
     def _update_drones(self, delta_time: float):
-        """Update all drones in the simulation (3D movement)"""
+        """Update all vehicles (drones or motorbikes) in the simulation"""
         for depot in self.map.depots:
-            for drone in depot.drones:
-                if drone.status != DroneStatus.IDLE:
-                    # Calculate distance moved in 3D space
-                    # The actual movement is handled in drone.update_position()
-                    # which uses 3D vectors and considers vertical_speed
-                    distance_moved = drone.speed * delta_time
-                    self.stats['total_drone_distance'] += distance_moved
+            for vehicle in depot.drones:  # 'drones' holds either drones or motorbikes
+                if vehicle.status != DroneStatus.IDLE:
+                    # Only count distance when actually moving (not during service time)
+                    service_time = getattr(vehicle, '_service_time_remaining', 0.0)
+                    is_actually_moving = (
+                        vehicle.status not in [DroneStatus.PICKING_UP, DroneStatus.DROPPING_OFF] and
+                        service_time <= 0 and
+                        vehicle.route is not None and len(vehicle.route) > 0
+                    )
+                    
+                    if is_actually_moving:
+                        distance_moved = vehicle.speed * delta_time
+                        
+                        if self.simulation_mode == "motorbike":
+                            self.stats['total_vehicle_distance'] += distance_moved
+                            # Calculate fuel cost (won per km)
+                            fuel_cost_per_m = getattr(config, 'MOTORBIKE_FUEL_COST_PER_KM', 150) / 1000
+                            self.stats['fuel_cost'] += distance_moved * fuel_cost_per_m
+                        else:
+                            self.stats['total_drone_distance'] += distance_moved
                 
-                self._update_drone(drone, delta_time)
+                self._update_drone(vehicle, delta_time)
                 
                 # Check for building collisions and update collision status
-                self._check_drone_collision(drone)
+                self._check_drone_collision(vehicle)
     
-    def _update_drone(self, drone: Drone, delta_time: float):
-        """Update individual drone position and state
+    def _update_drone(self, vehicle: Vehicle, delta_time: float):
+        """Update individual vehicle (drone or motorbike) position and state
         
-        The drone's update_position() method handles:
-        - 3D movement along route waypoints
+        The vehicle's update_position() method handles:
+        - Movement along route waypoints (3D for drone, 2D for motorbike)
         - Automatic state transitions (FLYING -> PICKING_UP -> DELIVERING -> DROPPING_OFF -> RETURNING -> IDLE)
         - Service time waits at stores (pickup) and customers (delivery)
-        - Horizontal and vertical speed considerations
+        - For motorbikes: service time scales with building height
         
         Args:
-            drone: Drone to update
+            vehicle: Drone or Motorbike to update
             delta_time: Time elapsed since last update
         """
-        if drone.status == DroneStatus.IDLE:
+        if vehicle.status == DroneStatus.IDLE:
             # Reset collision status when idle
-            drone.collision_status = 'none'
-            # Charge battery while idle
-            battery_level = min(1, drone.battery_level + delta_time * config.DRONE_CHARGING_SPEED)
-            self.stats['charging_cost'] += (battery_level - drone.battery_level) * config.DRONE_BATTERY_CAPACITY * config.CHARGING_COST
-            drone.battery_level = battery_level
+            vehicle.collision_status = 'none'
+            
+            if isinstance(vehicle, Motorbike):
+                # Motorbikes don't charge - accumulate labor cost instead
+                # Labor cost is for the working hours (even when idle, rider is on duty)
+                labor_cost_per_sec = getattr(config, 'MOTORBIKE_LABOR_COST_PER_HOUR', 15_000) / 3600
+                self.stats['labor_cost'] += delta_time * labor_cost_per_sec
+            else:
+                # Drone: Charge battery while idle
+                battery_level = min(1, vehicle.battery_level + delta_time * config.DRONE_CHARGING_SPEED)
+                self.stats['charging_cost'] += (battery_level - vehicle.battery_level) * config.DRONE_BATTERY_CAPACITY * config.CHARGING_COST
+                vehicle.battery_level = battery_level
 
             return
         else:
-            # Update drone's 3D position and state
-            # The Drone.update_position() method in entities.py handles all 3D logic
-            # including service time waits at stores and customers
-            drone.update_position(delta_time)
+            # For motorbikes: accumulate labor cost during active delivery
+            if isinstance(vehicle, Motorbike):
+                labor_cost_per_sec = getattr(config, 'MOTORBIKE_LABOR_COST_PER_HOUR', 15_000) / 3600
+                self.stats['labor_cost'] += delta_time * labor_cost_per_sec
+            
+            # Update vehicle's position and state
+            vehicle.update_position(delta_time)
     
     def _check_drone_collision(self, drone: Drone):
         """Check if drone is colliding with a building and update collision status
@@ -355,19 +400,30 @@ class SimulationEngine:
         
         return drone_positions
     
-    def get_active_drones(self) -> List[Drone]:
-        """Get list of all active (non-idle) drones
+    def get_active_drones(self) -> List[Vehicle]:
+        """Get list of all active (non-idle) vehicles (drones or motorbikes)
         
         Returns:
-            List of drones that are currently flying/delivering
+            List of vehicles that are currently flying/delivering
         """
-        active_drones = []
+        active_vehicles = []
         for depot in self.map.depots:
-            for drone in depot.drones:
-                if drone.status != DroneStatus.IDLE:
-                    active_drones.append(drone)
+            for vehicle in depot.drones:
+                if vehicle.status != DroneStatus.IDLE:
+                    active_vehicles.append(vehicle)
         
-        return active_drones
+        return active_vehicles
+    
+    def get_all_vehicles(self) -> List[Vehicle]:
+        """Get list of all vehicles (including IDLE ones) for visualization
+        
+        Returns:
+            List of all vehicles from all depots
+        """
+        all_vehicles = []
+        for depot in self.map.depots:
+            all_vehicles.extend(depot.drones)
+        return all_vehicles
 
     def _record_failed_order(self, order: Order, reason: str):
         penalty_per_fail = getattr(

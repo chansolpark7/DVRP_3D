@@ -446,6 +446,269 @@ class Drone:
         max_distance = self.battery_level * config.DRONE_BATTERY_LIFE
         return required_distance <= max_distance
 
+
+@dataclass
+class Motorbike:
+    """Represents a delivery motorbike (ground-level, 2D movement)
+    
+    Key differences from Drone:
+    - Moves only on ground level (y=0)
+    - Service time depends on building height (rider must climb/use elevator)
+    - No battery limitation (fuel assumed sufficient)
+    - Tracks total distance for fuel cost calculation
+    """
+    id: int
+    position: Position  # 2D position on ground (y should always be 0)
+    depot: Depot
+    status: DroneStatus = DroneStatus.IDLE  # Reuse DroneStatus for simplicity
+    current_order: Optional['Order'] = None
+    current_orders: List['Order'] = None  # Multi-delivery: list of assigned orders
+    route: List[Position] = None  # List of 2D waypoints (ground level)
+    route_waypoint_order_map: dict = None  # Maps waypoint index to (Order, visit_type)
+    speed: float = None  # Ground speed (units per second)
+    collision_status: str = 'none'
+    _waypoint_index: int = 0
+    _service_time_remaining: float = 0.0
+    _current_service_type: str = None
+    _current_target_floor: int = 0  # Floor number for current delivery (for service time calculation)
+    total_distance_traveled: float = 0.0  # Track total distance for fuel cost
+    
+    # For compatibility with Drone interface
+    battery_level: float = 1.0  # Always 1.0 (no battery limitation)
+    
+    def __post_init__(self):
+        if self.current_orders is None:
+            self.current_orders = []
+        if self.route_waypoint_order_map is None:
+            self.route_waypoint_order_map = {}
+        if self.speed is None:
+            self.speed = getattr(config, 'MOTORBIKE_SPEED', 8.0)
+        # Ensure position is at ground level
+        self.position.y = 0
+    
+    def assign_order(self, order: 'Order'):
+        """Assign an order to this motorbike"""
+        self.current_order = order
+        self.status = DroneStatus.LOADING
+        order.status = OrderStatus.ASSIGNED
+    
+    def start_delivery(self, route: List[Position]):
+        """Start delivery with given route (ground level)"""
+        if route and len(route) > 1:
+            # Ensure all waypoints are at ground level for motorbike
+            self.route = []
+            for pos in route:
+                ground_pos = pos.copy()
+                ground_pos.y = 0  # Force ground level
+                self.route.append(ground_pos)
+            self.status = DroneStatus.FLYING
+            print(f"🏍️ Motorbike {self.id}: Starting delivery with {len(self.route)} waypoints")
+        else:
+            print(f"❌ ERROR: Motorbike {self.id} received invalid route")
+            self.route = None
+            self.status = DroneStatus.IDLE
+    
+    def _calculate_service_time(self, floor_number: int) -> float:
+        """Calculate service time based on floor number.
+        
+        Formula: base_time + (floor_number * time_per_floor)
+        Ground floor (floor 0) has no additional time.
+        """
+        base_time = getattr(config, 'MOTORBIKE_BASE_SERVICE_TIME', 60.0)
+        time_per_floor = getattr(config, 'MOTORBIKE_TIME_PER_FLOOR', 15.0)
+        return base_time + (floor_number * time_per_floor)
+    
+    def _get_floor_from_position(self, position: Position) -> int:
+        """Get floor number from a position's height."""
+        floor_height = getattr(config, 'FLOOR_HEIGHT', 3.0)
+        return int(position.y / floor_height)
+    
+    def _clamp_to_map_bounds(self, x: float, z: float) -> tuple:
+        """Clamp position to stay within map boundaries."""
+        margin = 5.0
+        map_width = getattr(config, 'MAP_WIDTH', 2000)
+        map_depth = getattr(config, 'MAP_DEPTH', 2000)
+        
+        clamped_x = max(margin, min(map_width - margin, x))
+        clamped_z = max(margin, min(map_depth - margin, z))
+        return clamped_x, clamped_z
+    
+    def update_position(self, dt: float):
+        """Update motorbike position along route (ground-level 2D movement)."""
+        # Handle service time waiting
+        if self._service_time_remaining > 0:
+            self._service_time_remaining -= dt
+            if self._service_time_remaining <= 0:
+                self._service_time_remaining = 0
+                self._complete_service()
+            return
+        
+        if not self.route:
+            return
+        
+        target = self.route[0]
+        # 2D movement only (ground level)
+        direction = Position(
+            target.x - self.position.x,
+            0,  # No vertical movement
+            target.z - self.position.z
+        )
+        distance = self.position.distance_to_2d(target)
+        
+        if distance < 0.1:
+            self._handle_waypoint_arrival()
+            return
+        
+        if distance > 0:
+            move_distance = self.speed * dt
+            self.total_distance_traveled += min(move_distance, distance)
+            
+            if distance < move_distance:
+                # Clamp target to map bounds
+                clamped_x, clamped_z = self._clamp_to_map_bounds(target.x, target.z)
+                self.position.x = clamped_x
+                self.position.z = clamped_z
+                self.position.y = 0  # Stay on ground
+                self._handle_waypoint_arrival()
+            else:
+                ratio = move_distance / distance
+                new_x = self.position.x + direction.x * ratio
+                new_z = self.position.z + direction.z * ratio
+                # Clamp to map bounds
+                self.position.x, self.position.z = self._clamp_to_map_bounds(new_x, new_z)
+                self.position.y = 0  # Stay on ground
+    
+    def _handle_waypoint_arrival(self):
+        """Handle arrival at waypoint with height-dependent service time."""
+        if not self.route:
+            return
+        
+        self.route.pop(0)
+        current_waypoint_idx = self._waypoint_index
+        self._waypoint_index += 1
+        
+        # Skip service time for first waypoint (depot start)
+        if current_waypoint_idx == 0:
+            if not self.route:
+                self._complete_delivery_route()
+            return
+        
+        # Multi-delivery mode
+        if self.route_waypoint_order_map and current_waypoint_idx in self.route_waypoint_order_map:
+            order, visit_type = self.route_waypoint_order_map[current_waypoint_idx]
+            
+            if visit_type == "store":
+                # Calculate service time based on store floor
+                floor_num = self._get_floor_from_position(order.store_position)
+                service_time = self._calculate_service_time(floor_num)
+                self._service_time_remaining = service_time
+                self._current_service_type = "store"
+                self._current_target_floor = floor_num
+                self.status = DroneStatus.PICKING_UP
+                print(f"🏍️ Motorbike {self.id}: Arrived at STORE (floor {floor_num}) for Order {order.id} - picking up ({service_time:.0f}s)")
+                
+            elif visit_type == "customer":
+                # Calculate service time based on customer floor
+                floor_num = self._get_floor_from_position(order.customer_position)
+                service_time = self._calculate_service_time(floor_num)
+                self._service_time_remaining = service_time
+                self._current_service_type = "customer"
+                self._current_target_floor = floor_num
+                self.status = DroneStatus.DROPPING_OFF
+                print(f"🏍️ Motorbike {self.id}: Arrived at CUSTOMER (floor {floor_num}) for Order {order.id} - delivering ({service_time:.0f}s)")
+        else:
+            # Single delivery mode
+            if self.status == DroneStatus.FLYING:
+                floor_num = 0
+                if self.current_order:
+                    floor_num = self._get_floor_from_position(self.current_order.store_position)
+                service_time = self._calculate_service_time(floor_num)
+                self._service_time_remaining = service_time
+                self._current_service_type = "store"
+                self.status = DroneStatus.PICKING_UP
+                print(f"🏍️ Motorbike {self.id}: Arrived at STORE (floor {floor_num}) - picking up ({service_time:.0f}s)")
+            elif self.status == DroneStatus.DELIVERING:
+                floor_num = 0
+                if self.current_order:
+                    floor_num = self._get_floor_from_position(self.current_order.customer_position)
+                service_time = self._calculate_service_time(floor_num)
+                self._service_time_remaining = service_time
+                self._current_service_type = "customer"
+                self.status = DroneStatus.DROPPING_OFF
+                print(f"🏍️ Motorbike {self.id}: Arrived at CUSTOMER (floor {floor_num}) - delivering ({service_time:.0f}s)")
+        
+        if not self.route and self._service_time_remaining <= 0:
+            self._complete_delivery_route()
+    
+    def _complete_service(self):
+        """Complete the current service operation."""
+        current_waypoint_idx = self._waypoint_index - 1
+        
+        if self.route_waypoint_order_map and current_waypoint_idx in self.route_waypoint_order_map:
+            order, visit_type = self.route_waypoint_order_map[current_waypoint_idx]
+            
+            if visit_type == "store":
+                print(f"✅ Motorbike {self.id}: Pickup complete for Order {order.id}")
+                order.status = OrderStatus.IN_PROGRESS
+                self.status = DroneStatus.DELIVERING
+            elif visit_type == "customer":
+                print(f"✅ Motorbike {self.id}: Delivery complete for Order {order.id}")
+                order.status = OrderStatus.COMPLETED
+                if order in self.current_orders:
+                    self.current_orders.remove(order)
+                self.status = DroneStatus.FLYING
+        else:
+            if self._current_service_type == "store":
+                print(f"✅ Motorbike {self.id}: Pickup complete")
+                self.status = DroneStatus.DELIVERING
+            elif self._current_service_type == "customer":
+                print(f"✅ Motorbike {self.id}: Delivery complete")
+                if self.current_order:
+                    self.current_order.status = OrderStatus.COMPLETED
+                self.status = DroneStatus.RETURNING
+        
+        self._current_service_type = None
+        self._current_target_floor = 0
+        
+        if not self.route:
+            self._complete_delivery_route()
+    
+    def _complete_delivery_route(self):
+        """Complete the delivery route."""
+        if self.current_orders:
+            for order in self.current_orders:
+                if order.status != OrderStatus.COMPLETED:
+                    order.status = OrderStatus.COMPLETED
+            print(f"✅ Motorbike {self.id}: All {len(self.current_orders)} orders COMPLETED")
+            self.current_orders = []
+        elif self.current_order:
+            if self.current_order.status != OrderStatus.COMPLETED:
+                self.current_order.status = OrderStatus.COMPLETED
+            print(f"✅ Motorbike {self.id}: Order {self.current_order.id} COMPLETED")
+            self.current_order = None
+        
+        self.status = DroneStatus.IDLE
+        self.route_waypoint_order_map = {}
+        self._waypoint_index = 0
+    
+    def can_complete_order(self, order: 'Order') -> bool:
+        """Motorbike always returns True (no range limitation by default)."""
+        range_limit = getattr(config, 'MOTORBIKE_RANGE_LIMIT', None)
+        if range_limit is None:
+            return True
+        
+        required_distance = (
+            self.position.distance_to_2d(order.store_position) +
+            order.store_position.distance_to_2d(order.customer_position) +
+            order.customer_position.distance_to_2d(self.depot.get_center())
+        )
+        return required_distance <= range_limit
+
+
+# Type alias for vehicle (either Drone or Motorbike)
+Vehicle = Drone  # Will be set dynamically based on config
+
+
 @dataclass
 class Order:
     """Represents a food delivery order"""

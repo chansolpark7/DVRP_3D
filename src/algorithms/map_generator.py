@@ -6,7 +6,7 @@ import random
 import math
 from typing import List, Tuple, Optional
 from shapely.geometry import Polygon, box
-from ..models.entities import Building, Position, EntityType, Map, Depot, Drone, DroneStatus, Store, Customer
+from ..models.entities import Building, Position, EntityType, Map, Depot, Drone, Motorbike, DroneStatus, Store, Customer
 import config
 
 # Import floor height from config
@@ -479,35 +479,55 @@ class DepotPlacer:
         return None
     
     def create_depots_with_drones(self, depot_positions: List[Position]) -> List[Depot]:
-        """Create depot objects with drones at given positions"""
+        """Create depot objects with vehicles (drones or motorbikes based on config) at given positions"""
         depots = []
+        
+        # Check simulation mode
+        simulation_mode = getattr(config, 'SIMULATION_MODE', 'drone')
+        vehicles_per_depot = getattr(config, 'VEHICLES_PER_DEPOT', config.DRONES_PER_DEPOT)
         
         for i, pos in enumerate(depot_positions):
             
-            # 1. 드론 리스트가 비어있는 Depot 객체를 먼저 생성합니다.
+            # 1. Create Depot object with empty vehicle list
             depot = Depot(
                 id=i,
                 position=pos,
-                drones=[], # 우선 빈 리스트로 생성
-                capacity=config.DRONES_PER_DEPOT
+                drones=[],  # Will hold either drones or motorbikes
+                capacity=vehicles_per_depot
             )
             
-            # 2. 생성된 Depot의 중심점(get_center())을 이용해 드론들을 생성합니다.
-            drones = []
-            for j in range(config.DRONES_PER_DEPOT):
-                drone = Drone(
-                    id=f"drone_{i}_{j}",
-                    # Depot의 중심점을 드론의 초기 위치로 설정
-                    position=depot.get_center().copy(), 
-                    depot=depot, # 생성 시점에 depot을 바로 할당
-                    status=DroneStatus.IDLE
-                )
-                drones.append(drone)
+            # 2. Create vehicles based on simulation mode
+            vehicles = []
+            for j in range(vehicles_per_depot):
+                if simulation_mode == "motorbike":
+                    # Create motorbike at ground level
+                    vehicle_pos = depot.get_center().copy()
+                    vehicle_pos.y = 0  # Motorbike is at ground level
+                    vehicle = Motorbike(
+                        id=f"motorbike_{i}_{j}",
+                        position=vehicle_pos,
+                        depot=depot,
+                        status=DroneStatus.IDLE
+                    )
+                else:
+                    # Create drone (default)
+                    vehicle = Drone(
+                        id=f"drone_{i}_{j}",
+                        position=depot.get_center().copy(),
+                        depot=depot,
+                        status=DroneStatus.IDLE
+                    )
+                vehicles.append(vehicle)
             
-            # 3. 생성된 드론 리스트를 Depot 객체에 다시 할당합니다.
-            depot.drones = drones
+            # 3. Assign vehicles to depot (using 'drones' field for compatibility)
+            depot.drones = vehicles
             
             depots.append(depot)
             self.map.add_depot(depot)
+        
+        if simulation_mode == "motorbike":
+            print(f"  Created {len(depots)} depots with {vehicles_per_depot} motorbikes each")
+        else:
+            print(f"  Created {len(depots)} depots with {vehicles_per_depot} drones each")
         
         return depots

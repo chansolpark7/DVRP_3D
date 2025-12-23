@@ -3,6 +3,11 @@ from pathlib import Path
 
 # Configuration file for DVRP simulation (3D)
 
+# ============================================
+# SIMULATION MODE: "drone" or "motorbike"
+# ============================================
+SIMULATION_MODE = "motorbike"  # Change to "motorbike" for baseline comparison
+
 RUN_VISUALIZER = True
 SIMULATION_DELTA_TIME = 0.05 # s
 if not RUN_VISUALIZER:
@@ -45,17 +50,18 @@ CUSTOMER_RATIO = 0.5  # 50% of buildings are customers
 
 # Depot configuration
 TOTAL_DEPOTS = 2
-DRONES_PER_DEPOT = 2
+DRONES_PER_DEPOT = 2  # Also used for motorbikes when SIMULATION_MODE = "motorbike"
+VEHICLES_PER_DEPOT = DRONES_PER_DEPOT  # Generic alias
 DEPOT_SIZE = 20
 DEPOT_SAFETY_MARGIN = 30.0  # Safety distance from buildings (in meters)
 
 # Simulation configuration
 SIMULATION_SPEED = 5  # Real-time multiplier
-ORDER_GENERATION_RATE = 0.0003  # Orders per second (lower to avoid overload)
-MAX_ORDER_DELAY = 3600  # Maximum seconds to wait for order
-ROUTE_RETRY_INTERVAL = 60.0  # Seconds to wait before retrying failed routes
-ROUTE_RETRY_MAX_ATTEMPTS = 3  # How many times to retry routing an order
-ROUTE_CONNECTIVITY_CACHE_TTL = 300.0  # seconds to keep failed depot-route connectivity info
+ORDER_GENERATION_RATE = 0.0002  # Orders per second (reduced for motorbike baseline)
+MAX_ORDER_DELAY = 7200  # Maximum seconds to wait for order (2 hours)
+ROUTE_RETRY_INTERVAL = 30.0  # Seconds to wait before retrying failed routes (reduced)
+ROUTE_RETRY_MAX_ATTEMPTS = 5  # How many times to retry routing an order (increased)
+ROUTE_CONNECTIVITY_CACHE_TTL = 60.0  # seconds to keep failed depot-route connectivity info (reduced)
 
 # Drone configuration (realistic delivery drone parameters)
 # Reference: DJI FlyCart 30, Wing drones, typical commercial delivery drones
@@ -68,12 +74,31 @@ DRONE_CHARGING_TIME = 3600  # seconds (1 hour for full charge, fast charging)
 DRONE_CHARGING_SPEED = 1.0 / DRONE_CHARGING_TIME  # Battery fraction per second
 DRONE_BATTERY_CAPACITY = 4  # kWh (typical lithium battery pack for delivery drones)
 
-# Service time configuration (pickup and delivery operations)
+# Service time configuration (pickup and delivery operations) - for DRONE
 PICKUP_SERVICE_TIME = 60.0  # Time to pick up food at store (seconds) - 1 minute
 DELIVERY_SERVICE_TIME = 60.0  # Time to deliver food to customer (seconds) - 1 minute
 SERVICE_TIME_PER_STOP = 60.0  # Default service time per stop (seconds) for route planning
-CUSTOMER_MAX_WAIT_TIME = 600.0  # Maximum customer wait time (seconds)
+CUSTOMER_MAX_WAIT_TIME = 1800.0  # Maximum customer wait time (30 minutes, relaxed for motorbike mode)
 BATTERY_SAFETY_MARGIN = 1.2  # Battery safety margin (20% reserve)
+
+# ============================================
+# MOTORBIKE CONFIGURATION (Baseline Comparison)
+# ============================================
+MOTORBIKE_SPEED = 8  # m/s (~29 km/h, urban average with traffic)
+MOTORBIKE_CAPACITY = 3  # Number of orders per motorbike (same as drone for fair comparison)
+
+# Motorbike service time (height-dependent: rider must climb/use elevator)
+# Formula: base_time + (floor_number * time_per_floor)
+MOTORBIKE_BASE_SERVICE_TIME = 60.0  # Base service time (seconds)
+MOTORBIKE_TIME_PER_FLOOR = 15.0  # Additional time per floor (seconds) - elevator wait + travel
+
+# Motorbike has no range limitation (fuel assumed sufficient)
+MOTORBIKE_RANGE_LIMIT = None  # Set to float (meters) if range limitation needed
+
+# Motorbike costs
+MOTORBIKE_COST = 3_000_000  # won per motorbike (purchase cost)
+MOTORBIKE_FUEL_COST_PER_KM = 150  # won/km (fuel consumption)
+MOTORBIKE_LABOR_COST_PER_HOUR = 15_000  # won/hour (rider wage)
 
 # Insertion heuristic optimization parameters
 INSERTION_MAX_DEPOT_DISTANCE = 2000  # Max distance from depot to store for drone filtering (meters)

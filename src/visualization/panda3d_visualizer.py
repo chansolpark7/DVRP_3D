@@ -25,7 +25,11 @@ from panda3d.core import (
 from direct.gui.OnscreenText import OnscreenText
 
 import config
-from src.models.entities import Map, Building, Depot, Drone, DroneStatus, EntityType, Position
+from src.models.entities import Map, Building, Depot, Drone, Motorbike, DroneStatus, EntityType, Position
+
+# Type alias for vehicle
+from typing import Union
+Vehicle = Union[Drone, Motorbike]
 
 
 # Configure Panda3D before ShowBase initialization
@@ -636,25 +640,46 @@ class Panda3DVisualizer(ShowBase):
         self.ambient_light = ambient_np
         self.sun_light = sun_np
         
-    def _format_drone_label(self, drone: Drone) -> str:
-        """Format drone label text with status and service time info"""
-        battery_pct = max(0.0, min(1.0, getattr(drone, 'battery_level', 0.0))) * 100
+    def _format_drone_label(self, vehicle: Vehicle) -> str:
+        """Format vehicle (drone or motorbike) label text with status and service time info"""
+        is_motorbike = isinstance(vehicle, Motorbike)
+        prefix = "M" if is_motorbike else "D"  # M for Motorbike, D for Drone
         
         # Show service status if applicable (using ASCII text instead of emojis for Panda3D compatibility)
-        service_time = getattr(drone, '_service_time_remaining', 0.0)
+        service_time = getattr(vehicle, '_service_time_remaining', 0.0)
         
-        if drone.status == DroneStatus.PICKING_UP and service_time > 0:
-            return f"D{drone.id}: {battery_pct:.0f}%\n[PICKUP] {service_time:.0f}s"
-        elif drone.status == DroneStatus.DROPPING_OFF and service_time > 0:
-            return f"D{drone.id}: {battery_pct:.0f}%\n[DELIVER] {service_time:.0f}s"
-        elif drone.status == DroneStatus.FLYING:
-            return f"D{drone.id}: {battery_pct:.0f}%\n[FLYING]"
-        elif drone.status == DroneStatus.DELIVERING:
-            return f"D{drone.id}: {battery_pct:.0f}%\n[DELIVERY]"
-        elif drone.status == DroneStatus.RETURNING:
-            return f"D{drone.id}: {battery_pct:.0f}%\n[RETURN]"
+        # For drones, show battery. For motorbikes, show floor info during service
+        if is_motorbike:
+            floor_num = getattr(vehicle, '_current_target_floor', 0)
+            
+            if vehicle.status == DroneStatus.PICKING_UP and service_time > 0:
+                return f"{prefix}{vehicle.id}\n[PICKUP F{floor_num}] {service_time:.0f}s"
+            elif vehicle.status == DroneStatus.DROPPING_OFF and service_time > 0:
+                return f"{prefix}{vehicle.id}\n[DELIVER F{floor_num}] {service_time:.0f}s"
+            elif vehicle.status == DroneStatus.FLYING:
+                return f"{prefix}{vehicle.id}\n[DRIVING]"
+            elif vehicle.status == DroneStatus.DELIVERING:
+                return f"{prefix}{vehicle.id}\n[DELIVERY]"
+            elif vehicle.status == DroneStatus.RETURNING:
+                return f"{prefix}{vehicle.id}\n[RETURN]"
+            else:
+                return f"{prefix}{vehicle.id}"
         else:
-            return f"D{drone.id}: {battery_pct:.0f}%"
+            # Drone - show battery percentage
+            battery_pct = max(0.0, min(1.0, getattr(vehicle, 'battery_level', 0.0))) * 100
+            
+            if vehicle.status == DroneStatus.PICKING_UP and service_time > 0:
+                return f"{prefix}{vehicle.id}: {battery_pct:.0f}%\n[PICKUP] {service_time:.0f}s"
+            elif vehicle.status == DroneStatus.DROPPING_OFF and service_time > 0:
+                return f"{prefix}{vehicle.id}: {battery_pct:.0f}%\n[DELIVER] {service_time:.0f}s"
+            elif vehicle.status == DroneStatus.FLYING:
+                return f"{prefix}{vehicle.id}: {battery_pct:.0f}%\n[FLYING]"
+            elif vehicle.status == DroneStatus.DELIVERING:
+                return f"{prefix}{vehicle.id}: {battery_pct:.0f}%\n[DELIVERY]"
+            elif vehicle.status == DroneStatus.RETURNING:
+                return f"{prefix}{vehicle.id}: {battery_pct:.0f}%\n[RETURN]"
+            else:
+                return f"{prefix}{vehicle.id}: {battery_pct:.0f}%"
     
     def _create_route_line(self, drone: Drone, color: Vec4 = None) -> Optional[NodePath]:
         """Create a line visualization for drone's route
@@ -876,42 +901,67 @@ class Panda3DVisualizer(ShowBase):
         self.building_nodes.clear()
         self.depot_nodes.clear()
         
-    def update_drone_visuals(self, drones: List[Drone]):
-        """Update drone positions and create new drone entities if needed
+    def update_drone_visuals(self, drones: List[Vehicle]):
+        """Update vehicle (drone or motorbike) positions and create new entities if needed
         
         Args:
-            drones: List of active drones to visualize
+            drones: List of active vehicles (drones or motorbikes) to visualize
         """
         if not drones:
             return
             
         active_drone_ids = set()
         
-        color_normal = Vec4(1, 1, 0, 1)   # Yellow - flying
-        color_collision = Vec4(1, 0, 0, 1)  # Red - collision
-        color_pickup = Vec4(0, 1, 0.5, 1)   # Cyan/Teal - picking up at store
-        color_dropoff = Vec4(1, 0.5, 0, 1)  # Orange - delivering to customer
-        color_returning = Vec4(0.5, 0.5, 1, 1)  # Light blue - returning
+        # Colors for drones
+        drone_color_normal = Vec4(1, 1, 0, 1)   # Yellow - flying
+        drone_color_collision = Vec4(1, 0, 0, 1)  # Red - collision
+        drone_color_pickup = Vec4(0, 1, 0.5, 1)   # Cyan/Teal - picking up at store
+        drone_color_dropoff = Vec4(1, 0.5, 0, 1)  # Orange - delivering to customer
+        drone_color_returning = Vec4(0.5, 0.5, 1, 1)  # Light blue - returning
+        
+        # Colors for motorbikes (distinct purple-based colors)
+        bike_color_normal = Vec4(0.8, 0.2, 0.8, 1)   # Purple - driving
+        bike_color_collision = Vec4(1, 0, 0, 1)  # Red - collision
+        bike_color_pickup = Vec4(0.6, 0.2, 0.8, 1)   # Dark purple - picking up at store
+        bike_color_dropoff = Vec4(1, 0.4, 0.8, 1)  # Pink - delivering to customer
+        bike_color_returning = Vec4(0.5, 0.3, 0.7, 1)  # Muted purple - returning
         
         for drone in drones:
             active_drone_ids.add(drone.id)
             
+            # Determine if this is a motorbike
+            is_motorbike = isinstance(drone, Motorbike)
+            
             # Get collision status (for color only, not visibility)
             collision_status = getattr(drone, 'collision_status', 'none')
-            # Always show drone, even when inside buildings
+            # Always show vehicle, even when inside buildings
             is_visible = True
             
-            # Determine color based on status and collision
-            if collision_status == 'accidental':
-                drone_color = color_collision
-            elif drone.status == DroneStatus.PICKING_UP:
-                drone_color = color_pickup
-            elif drone.status == DroneStatus.DROPPING_OFF:
-                drone_color = color_dropoff
-            elif drone.status == DroneStatus.RETURNING:
-                drone_color = color_returning
+            # Determine color based on vehicle type, status and collision
+            if is_motorbike:
+                # Motorbike colors
+                if collision_status == 'accidental':
+                    drone_color = bike_color_collision
+                elif drone.status == DroneStatus.PICKING_UP:
+                    drone_color = bike_color_pickup
+                elif drone.status == DroneStatus.DROPPING_OFF:
+                    drone_color = bike_color_dropoff
+                elif drone.status == DroneStatus.RETURNING:
+                    drone_color = bike_color_returning
+                else:
+                    drone_color = bike_color_normal
             else:
-                drone_color = color_normal
+                # Drone colors
+                if collision_status == 'accidental':
+                    drone_color = drone_color_collision
+                elif drone.status == DroneStatus.PICKING_UP:
+                    drone_color = drone_color_pickup
+                elif drone.status == DroneStatus.DROPPING_OFF:
+                    drone_color = drone_color_dropoff
+                elif drone.status == DroneStatus.RETURNING:
+                    drone_color = drone_color_returning
+                else:
+                    drone_color = drone_color_normal
             
             # Convert drone position to Panda3D coords
             panda_pos = _sim_pos_to_panda3d(drone.position)

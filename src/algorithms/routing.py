@@ -8,7 +8,7 @@ import numpy as np
 import networkx as nx
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Optional, Set
-from shapely.geometry import LineString
+from shapely.geometry import LineString, LineString as ShapelyLineString, Point
 from ..models.entities import Position, Order, Drone, Map, Building
 import config
 
@@ -907,3 +907,501 @@ class DynamicRouteUpdater:
                             original_destination: Position) -> List[Position]:
         waypoints = []
         return self.routing_algorithm.calculate_route(current_position, waypoints, original_destination)
+
+
+class MotorbikeRouting(RoutingAlgorithm):
+    """2D Ground-level routing algorithm for motorbikes.
+    
+    Uses the same algorithm as MultiLevelAStarRouting for drones,
+    but operates on the 2D ground plane (y=0) without height consideration.
+    """
+    
+    def __init__(self, map_obj: Map = None):
+        self.map = map_obj
+        
+        if self.map and self.map.buildings:
+            print(f"  MotorbikeRouting initialized for 2D ground-level navigation")
+    
+    def set_map(self, map_obj: Map):
+        self.map = map_obj
+
+    def sample_ring_accumulated(self, coords):
+        """Sample points along a polygon ring at regular intervals."""
+        MAX_EDGE_STEP = 6
+        sampled = []
+        n = len(coords)
+
+        # 처음 기준점
+        prev_x, prev_z = coords[0]
+        sampled.append((prev_x, prev_z))
+
+        accumulated = 0.0  # 누적 길이
+
+        for i in range(1, n + 1):
+            cur_x, cur_z = coords[i % n]  # 순환
+            dx = cur_x - prev_x
+            dz = cur_z - prev_z
+            seg_len = (dx*dx + dz*dz) ** 0.5
+
+            while accumulated + seg_len >= MAX_EDGE_STEP:
+                remain = MAX_EDGE_STEP - accumulated
+                t = remain / seg_len
+                sx = prev_x + dx * t
+                sz = prev_z + dz * t
+                sampled.append((sx, sz))
+                accumulated = 0.0
+                seg_len -= remain
+                prev_x, prev_z = sx, sz
+                dx = cur_x - prev_x
+                dz = cur_z - prev_z
+
+            accumulated += seg_len
+            prev_x, prev_z = cur_x, cur_z
+
+        return sampled
+
+    def _get_building_vertices_2d(self, building: Building) -> List[Position]:
+        """건물의 꼭짓점에서 약간 바깥쪽으로 오프셋된 노드 위치를 반환합니다.
+        
+        지면(y=0)에서만 노드를 생성합니다.
+        오프셋은 XZ 평면(수평)으로만 적용됩니다.
+        """
+        EPSILON = 1e-5
+        def ccw(a, b, c):
+            return (b[0] - a[0])*(c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+
+        def convex_hull(point): # ccw
+            point = sorted(point)
+            a = []
+            for p in point:
+                while len(a) >= 2 and ccw(a[-2], a[-1], p) <= EPSILON:
+                    a.pop()
+                a.append(p)
+            b = []
+            for p in reversed(point):
+                while len(b) >= 2 and ccw(b[-2], b[-1], p) <= EPSILON:
+                    b.pop()
+                b.append(p)
+            return a[:-1] + b[:-1]
+
+        outer_points = list(map(tuple, building.outer_poly.exterior.coords[:-1]))
+        inner_points = list(map(tuple, building.inner_poly.exterior.coords[:-1]))
+        outer_hull = convex_hull(outer_points)
+        inner_hull = convex_hull(inner_points)
+        n = len(outer_hull)
+        m = len(inner_hull)
+
+        start = 0
+        for j in range(1, m):
+            if ccw(outer_hull[0], inner_hull[start], inner_hull[j]) <= EPSILON:
+                start = j
+
+        i = 0
+        j = start
+        p = outer_hull[i]
+
+        sampled = []
+        sampled.append(p)
+        while True:
+            while ccw(p, inner_hull[j], inner_hull[(j+1) % m]) <= EPSILON and j != (start - 1) % m:
+                j = (j + 1) % m
+
+            while outer_hull[i] == p or ccw(p, inner_hull[j], outer_hull[i]) * ccw(p, inner_hull[j], outer_hull[(i+1)%n]) > EPSILON:
+                i = (i + 1) % n
+            index = outer_points.index(outer_hull[(i+1) % n])
+            while ccw(p, inner_hull[j], outer_points[index]) * ccw(p, inner_hull[j], outer_points[(index-1) % len(outer_points)]) > EPSILON:
+                index = (index - 1) % len(outer_points)
+            
+            A = outer_points[(index-1) % len(outer_points)]
+            B = outer_points[index]
+            I = inner_hull[j]
+            a = A[0] - p[0]
+            b = A[1] - p[1]
+            c = I[0] - p[0]
+            d = I[1] - p[1]
+            e = B[0] - A[0]
+            f = B[1] - A[1]
+            assert c*f - d*e != 0
+
+            alpha = (a*f - b*e) / (c*f - d*e)
+            new_p = (p[0] + alpha * c, p[1] + alpha * d)
+            if p != sampled[0] and ccw(p, new_p, sampled[0]) <= EPSILON:
+                break
+            p = new_p
+            sampled.append(p)
+            i = (i+1) % n
+            if j == (start-1) % m: break
+
+        # 2D: 지면 레벨(y=0)에서만 노드 생성
+        vertices = []
+        for x, z in sampled:
+            vertices.append(Position(x, 0, z, building.id))
+
+        return vertices
+
+    def _filter_relevant_buildings(self, p1: Position, p2: Position,
+                                   start_building_id: Optional[int] = None,
+                                   end_building_id: Optional[int] = None) -> List[Building]:
+        """주어진 직선 경로(p1-p2)와 교차하는 건물 중 시작/종료 건물을 제외하고 필터링합니다."""
+        relevant_buildings = []
+        baseline_2d_min_x = min(p1.x, p2.x)
+        baseline_2d_max_x = max(p1.x, p2.x)
+        baseline_2d_min_z = min(p1.z, p2.z)
+        baseline_2d_max_z = max(p1.z, p2.z)
+
+        for building in self.map.buildings:
+            if building.id == start_building_id or building.id == end_building_id:
+                continue
+
+            half_w = building.width / 2
+            half_d = building.depth / 2
+            b_min_x = building.position.x - half_w
+            b_max_x = building.position.x + half_w
+            b_min_z = building.position.z - half_d
+            b_max_z = building.position.z + half_d
+
+            if b_max_x < baseline_2d_min_x or b_min_x > baseline_2d_max_x or \
+               b_max_z < baseline_2d_min_z or b_min_z > baseline_2d_max_z:
+                continue
+
+            if self._segment_collides_2d(p1, p2, excluded_building_ids={p1.building_id, p2.building_id}, building_ids_to_check={building.id}):
+                 relevant_buildings.append(building)
+        return relevant_buildings
+            
+    def _segment_collides_2d(self, p1: Position, p2: Position,
+                               excluded_building_ids: Optional[Set[Optional[int]]] = None,
+                               building_ids_to_check: Optional[Set[int]] = None) -> bool:
+        """Check if 2D segment (on ground plane) passes through any building footprint.
+        
+        Unlike 3D version, this only checks XZ plane intersection without height consideration.
+        """
+        line_2d = LineString([(p1.x, p1.z), (p2.x, p2.z)])
+        
+        # Tree query returns list indices, not building IDs
+        building_indices: set = set(self.map.tree.query(line_2d))
+        
+        # Convert building IDs to indices for filtering
+        id_to_idx = getattr(self.map, 'building_id_to_index', None)
+        
+        if building_ids_to_check is not None and id_to_idx:
+            # Convert IDs to indices
+            indices_to_check = {id_to_idx.get(bid) for bid in building_ids_to_check if bid is not None}
+            indices_to_check.discard(None)
+            building_indices = building_indices & indices_to_check
+        
+        if excluded_building_ids is not None and id_to_idx:
+            # Convert IDs to indices
+            excluded_indices = {id_to_idx.get(bid) for bid in excluded_building_ids if bid is not None}
+            excluded_indices.discard(None)
+            building_indices -= excluded_indices
+
+        for building_idx in building_indices:
+            building: Building = self.map.buildings[building_idx]
+            
+            poly = building.inner_poly
+            if poly is None:
+                continue
+            
+            # 2D: 단순히 XZ 평면에서의 교차만 확인 (높이 무시)
+            intersection = line_2d.intersection(poly)
+            if not intersection.is_empty:
+                return True
+
+        return False
+    
+    def _euclidean_distance_2d(self, pos1, pos2) -> float:
+        """Calculate 2D Euclidean distance (ignoring y/height)."""
+        if isinstance(pos1, Position):
+            x1, z1 = pos1.x, pos1.z
+        else:
+            x1, z1 = pos1[0], pos1[2]
+        if isinstance(pos2, Position):
+            x2, z2 = pos2.x, pos2.z
+        else:
+            x2, z2 = pos2[0], pos2[2]
+        return math.sqrt((x1 - x2)**2 + (z1 - z2)**2)
+
+    def _find_path_core(self, start: Position, end: Position) -> List[Position]:
+        """기준선 기반 필터링된 그래프에서 A* 경로를 찾아 노드 리스트를 반환합니다.
+        
+        드론의 _find_path_core와 동일한 로직이지만 2D(지면)에서만 동작합니다.
+        """
+        if start == end:
+            return [Position(start.x, 0, start.z)]
+
+        nodes: List[Position] = [start, end]
+        
+        # 시작/끝 건물 ID
+        start_building_id = start.building_id
+        end_building_id = end.building_id
+
+        # 관련 건물 필터링 (시작/끝 건물 제외)
+        relevant_buildings = self._filter_relevant_buildings(
+            start, end, 
+            start_building_id=start_building_id,
+            end_building_id=end_building_id
+        )
+        relevant_building_ids = set()
+
+        # 관련 건물의 노드 추가 (오프셋 적용됨)
+        for building in relevant_buildings:
+            relevant_building_ids.add(building.id)
+            vertices = self._get_building_vertices_2d(building)
+            for vertex in vertices:
+                if vertex in nodes: raise
+                nodes.append(vertex)
+        
+        # 시작/끝 건물의 꼭짓점도 추가 (건물 내부에서 외부로 나가기 위해)
+        start_building_vertices_start_idx = len(nodes)
+        if start_building_id is not None:
+            start_building = self.map.buildings[start_building_id]
+            vertices = self._get_building_vertices_2d(start_building)
+            for vertex in vertices:
+                if vertex not in nodes:
+                    nodes.append(vertex)
+        start_building_vertices_end_idx = len(nodes)
+        
+        end_building_vertices_start_idx = len(nodes)
+        if end_building_id is not None and end_building_id != start_building_id:
+            end_building = self.map.buildings[end_building_id]
+            vertices = self._get_building_vertices_2d(end_building)
+            for vertex in vertices:
+                if vertex not in nodes:
+                    nodes.append(vertex)
+        end_building_vertices_end_idx = len(nodes)
+        
+        # 충돌 검사에 시작/끝 건물도 포함
+        if start_building_id is not None:
+            relevant_building_ids.add(start_building_id)
+        if end_building_id is not None:
+            relevant_building_ids.add(end_building_id)
+
+        n = len(nodes)
+        dist = [-1] * n
+        connection = [None] * n
+        dist[0] = 0
+        queue = [(0, 0, 0)]
+
+        visited = [False] * n
+        while queue:
+            _, d, x = heapq.heappop(queue)
+            if visited[x] and d < dist[x]: raise
+            visited[x] = True
+
+            if x == 1: break  # 끝점(index 1)에 도달
+            if dist[x] != d: continue
+            
+            for y in range(n):
+                if x == y: continue
+                p1 = nodes[x]
+                p2 = nodes[y]
+                d_ = self._euclidean_distance_2d(nodes[x], nodes[y]) + d
+                if dist[y] != -1 and d_ >= dist[y]: continue
+                
+                # 특수 케이스 체크
+                is_start_to_start_building = (x == 0 and start_building_vertices_start_idx <= y < start_building_vertices_end_idx)
+                is_end_building_to_end = (y == 1 and end_building_vertices_start_idx <= x < end_building_vertices_end_idx)
+                is_same_building_direct = (x == 0 and y == 1 and start_building_id == end_building_id and start_building_id is not None)
+                is_any_to_end = (y == 1)  # 끝점으로 가는 모든 경로
+                is_start_to_any = (x == 0)  # 시작점에서 나가는 모든 경로
+                
+                if is_start_to_start_building or is_end_building_to_end or is_same_building_direct:
+                    # 시작/끝 건물 내 이동은 항상 허용 (충돌 검사 생략)
+                    pass
+                elif is_any_to_end:
+                    # 끝점으로 들어가는 경우: 끝 건물만 제외하고 다른 건물은 충돌 검사
+                    excluded = {end_building_id} if end_building_id is not None else set()
+                    if self._segment_collides_2d(p1, p2, excluded, building_ids_to_check=relevant_building_ids):
+                        continue
+                elif is_start_to_any:
+                    # 시작점에서 나가는 경우: 시작 건물만 제외하고 다른 건물은 충돌 검사
+                    excluded = {start_building_id} if start_building_id is not None else set()
+                    if self._segment_collides_2d(p1, p2, excluded, building_ids_to_check=relevant_building_ids):
+                        continue
+                else:
+                    # 일반 충돌 검사
+                    excluded = set()
+                    
+                    # 같은 건물의 꼭짓점 간 이동은 해당 건물 제외
+                    if p1.building_id == p2.building_id and p1.building_id is not None:
+                        excluded.add(p1.building_id)
+                    
+                    if self._segment_collides_2d(p1, p2, excluded, building_ids_to_check=relevant_building_ids):
+                        continue
+
+                dist[y] = d_
+                connection[y] = x
+                heapq.heappush(queue, (d_ + self._euclidean_distance_2d((p2.x, 0, p2.z), (end.x, 0, end.z)), d_, y))
+
+        x = 1
+        if connection[x] == None:
+            print(f"⚠️  MotorbikeRouting: No path found")
+            return []
+
+        route = [nodes[x]]
+        while x != 0:
+            x = connection[x]
+            route.append(nodes[x])
+        route.reverse()
+        return route
+
+    def calculate_route_rec(self, start: Position, end: Position, depth=0) -> List[Position]:
+        """재귀적으로 2D 경로를 계산합니다."""
+        if depth > 100: return None
+        
+        # 직접 경로 안전 검사
+        if start.building_id is not None and start.building_id == end.building_id:
+            # 같은 건물 내 이동은 직접 경로 허용
+            is_direct_path_safe = True
+        else:
+            # 시작/끝 건물을 제외하고 다른 건물만 충돌 검사
+            excluded = {start.building_id, end.building_id} - {None}
+            is_direct_path_safe = not self._segment_collides_2d(start, end, excluded_building_ids=excluded)
+        
+        if is_direct_path_safe:
+            return [start, end]
+
+        route = self._find_path_core(start, end)
+        if not route or len(route) < 2:
+            return None
+
+        full_route = [route[0]]
+        for i in range(len(route) - 1):
+            a = route[i]
+            b = route[i+1]
+            # 각 단계도 건물 충돌 검사 (해당 노드의 건물만 제외)
+            is_step_safe = not self._segment_collides_2d(a, b, excluded_building_ids={a.building_id, b.building_id})
+            if is_step_safe:
+                full_route.append(b)
+            else:
+                extended_route = self.calculate_route_rec(a, b, depth + 1)
+                if not extended_route: return None
+
+                full_route.extend(extended_route[1:])
+
+        return full_route
+
+    def calculate_route(self, start: Position, waypoints: List[Position], end: Position) -> List[Position]:
+        """점진적 경로 탐색을 사용하여 전체 2D 경로를 계산합니다.
+        
+        드론의 calculate_route와 동일한 로직이지만 y좌표를 0으로 고정합니다.
+        """
+        # 모든 포인트를 지면 레벨로 설정
+        start_2d = start.copy()
+        start_2d.y = 0
+        
+        waypoints_2d = []
+        for wp in waypoints:
+            wp_2d = wp.copy()
+            wp_2d.y = 0
+            waypoints_2d.append(wp_2d)
+        
+        end_2d = end.copy()
+        end_2d.y = 0
+        
+        full_route = [start_2d]
+        segment_targets = waypoints_2d + [end_2d]
+
+        for p in full_route + segment_targets:
+            building = self.map.get_building_containing_point(p)
+            p.building_id = building.id if building else None
+
+        current_segment_start = start_2d
+
+        for segment_end in segment_targets:
+            working_path_segment = self.calculate_route_rec(current_segment_start, segment_end)
+            if not working_path_segment:
+                print(f"❌ MotorbikeRouting Error: Path calculation failed")
+                return []
+            else:
+                full_route.extend(working_path_segment[1:])
+
+            current_segment_start = segment_end
+
+        # 모든 경로 포인트의 y좌표를 0으로 보장
+        for pos in full_route:
+            pos.y = 0
+
+        return full_route
+    
+    def calculate_distance(self, route: List[Position]) -> float:
+        """Calculate total 2D distance of route (ignoring height)."""
+        if len(route) < 2:
+            return 0.0
+        
+        total_distance = 0.0
+        for i in range(len(route) - 1):
+            total_distance += self._euclidean_distance_2d(route[i], route[i + 1])
+        
+        return total_distance
+
+
+class MotorbikeRouteOptimizer:
+    """Route optimizer for motorbike deliveries."""
+    
+    def __init__(self, routing_algorithm: RoutingAlgorithm = None):
+        self.routing_algorithm = routing_algorithm or MotorbikeRouting()
+    
+    def set_routing_algorithm(self, routing_algorithm: RoutingAlgorithm):
+        self.routing_algorithm = routing_algorithm
+    
+    def optimize_delivery_route(self, motorbike, order, visualize: bool = False) -> List[Position]:
+        """Calculate optimal route for motorbike delivery.
+        
+        Route: depot -> store (ground entry) -> customer (ground entry) -> depot
+        All waypoints are at ground level.
+        """
+        from ..models.entities import Motorbike
+        
+        depot_pos = motorbike.depot.get_center().copy()
+        depot_pos.y = 0
+        
+        # Get ground-level entry points for store and customer
+        store_pos = order.store_position.copy()
+        store_pos.y = 0
+        
+        customer_pos = order.customer_position.copy()
+        customer_pos.y = 0
+        
+        # Calculate route
+        waypoints = [store_pos]
+        route = self.routing_algorithm.calculate_route(depot_pos, waypoints, customer_pos)
+        
+        # Add return to depot
+        if route:
+            return_route = self.routing_algorithm.calculate_route(customer_pos, [], depot_pos)
+            if return_route:
+                route.extend(return_route[1:])
+        
+        return route
+    
+    def optimize_multi_delivery_route(self, motorbike, orders: List, visualize: bool = False) -> List[Position]:
+        """Calculate optimal route for multiple deliveries.
+        
+        Simple approach: visit stores then customers in order.
+        """
+        from ..models.entities import Motorbike
+        
+        depot_pos = motorbike.depot.get_center().copy()
+        depot_pos.y = 0
+        
+        # Collect all stops at ground level
+        waypoints = []
+        for order in orders:
+            store_pos = order.store_position.copy()
+            store_pos.y = 0
+            waypoints.append(store_pos)
+        
+        for order in orders:
+            customer_pos = order.customer_position.copy()
+            customer_pos.y = 0
+            waypoints.append(customer_pos)
+        
+        # Calculate route through all waypoints
+        if not waypoints:
+            return [depot_pos]
+        
+        end_pos = depot_pos.copy()
+        route = self.routing_algorithm.calculate_route(depot_pos, waypoints, end_pos)
+        
+        return route if route else [depot_pos]
