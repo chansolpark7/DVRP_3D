@@ -384,27 +384,78 @@ class InsertionStrategy:
         return True
 
     def _build_waypoint_order_map(self, route: Route, exact_route: List[Position]) -> dict:
-        """Build mapping from waypoint index to (Order, visit_type)."""
+        """Build mapping from waypoint index to (Order, visit_type).
+        
+        Matches waypoints to visit positions using a two-pass approach:
+        1. First pass: Find exact or very close matches (within 1m)
+        2. Second pass: For unmatched visits, find the closest waypoint
+        
+        Skips index 0 (start position/depot) to prevent triggering service time
+        at the depot when starting a delivery.
+        """
         mapping = {}
-        threshold = max(config.NODE_OFFSET, 5.0)
+        # Very tight threshold for exact matches
+        exact_threshold = 1.0
+        # Fallback threshold for close matches
+        fallback_threshold = max(config.NODE_OFFSET, 3.0)
+        
+        # Get depot position to exclude it from matching
+        depot_pos = route.depot_position
+        
+        # Track which visits have been matched
+        matched_visits = set()
 
-        visit_idx = 0
-        for idx, waypoint in enumerate(exact_route):
-            if visit_idx >= len(route.visits):
-                break
+        # First pass: Find exact matches for each visit
+        for visit_idx, visit in enumerate(route.visits):
+            best_idx = -1
+            best_dist = float('inf')
+            
+            for idx, waypoint in enumerate(exact_route):
+                # Skip first waypoint (index 0) - it's the start position (depot)
+                if idx == 0:
+                    continue
+                
+                # Skip if already mapped
+                if idx in mapping:
+                    continue
+                
+                # Skip waypoints that are very close to depot (return path)
+                if depot_pos and waypoint.distance_to(depot_pos) < exact_threshold:
+                    continue
+                
+                dist = waypoint.distance_to(visit.position)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+            
+            # Only map if within exact threshold
+            if best_idx != -1 and best_dist <= exact_threshold:
+                mapping[best_idx] = (visit.order, visit.visit_type)
+                matched_visits.add(visit_idx)
 
-            visit = route.visits[visit_idx]
-            if waypoint.distance_to(visit.position) <= threshold:
-                mapping[idx] = (visit.order, visit.visit_type)
-                visit_idx += 1
-
-        # Handle remaining visits if any
-        while visit_idx < len(route.visits):
-            mapping[len(exact_route) - 1 + visit_idx - len(route.visits) + 1] = (
-                route.visits[visit_idx].order,
-                route.visits[visit_idx].visit_type
-            )
-            visit_idx += 1
+        # Second pass: For unmatched visits, find closest waypoint within fallback threshold
+        for visit_idx, visit in enumerate(route.visits):
+            if visit_idx in matched_visits:
+                continue
+            
+            best_idx = -1
+            best_dist = float('inf')
+            
+            for idx, waypoint in enumerate(exact_route):
+                if idx == 0:
+                    continue
+                if idx in mapping:
+                    continue
+                if depot_pos and waypoint.distance_to(depot_pos) < exact_threshold:
+                    continue
+                
+                dist = waypoint.distance_to(visit.position)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+            
+            if best_idx != -1 and best_dist <= fallback_threshold:
+                mapping[best_idx] = (visit.order, visit.visit_type)
 
         return mapping
 

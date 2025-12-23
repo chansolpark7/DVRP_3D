@@ -29,7 +29,9 @@ class DroneStatus(Enum):
     IDLE = "idle"
     LOADING = "loading"
     FLYING = "flying"
-    DELIVERING = "delivering"
+    PICKING_UP = "picking_up"  # Waiting at store for food pickup
+    DELIVERING = "delivering"  # Flying to customer (legacy, also used during delivery flight)
+    DROPPING_OFF = "dropping_off"  # Waiting at customer for delivery handoff
     RETURNING = "returning"
 
 
@@ -240,9 +242,11 @@ class Drone:
     route_waypoint_order_map: dict = None  # Maps waypoint index to (Order, visit_type)
     battery_level: float = 1.0  # 0.0 to 1.0
     speed: float = config.DRONE_SPEED  # horizontal speed (units per second)
-    vertical_speed: float = config.DRONE_SPEED * 0.5  # vertical speed (units per second)
+    vertical_speed: float = getattr(config, 'DRONE_VERTICAL_SPEED', config.DRONE_SPEED * 0.5)  # vertical speed (units per second)
     collision_status: str = 'none'  # 'none', 'accidental', 'destination_entry'
     _waypoint_index: int = 0  # Internal counter for tracking current waypoint
+    _service_time_remaining: float = 0.0  # Remaining service time at current stop (seconds)
+    _current_service_type: str = None  # "store" or "customer" - type of current service operation
     
     def __post_init__(self):
         if self.current_orders is None:
@@ -271,7 +275,16 @@ class Drone:
         """
         경로에 따라 드론 위치를 업데이트하고, 각 경유지에 도달할 때마다
         상태를 올바르게 변경합니다. (3D 이동 지원, 다중 배송 지원)
+        서비스 시간이 있으면 해당 시간 동안 대기합니다.
         """
+        # Handle service time waiting (pickup at store or delivery to customer)
+        if self._service_time_remaining > 0:
+            self._service_time_remaining -= dt
+            if self._service_time_remaining <= 0:
+                self._service_time_remaining = 0
+                self._complete_service()
+            return
+        
         # 경로가 없거나 비어있으면 아무것도 하지 않습니다.
         if not self.route:
             return
@@ -308,7 +321,7 @@ class Drone:
                 self.position.z += direction.z * ratio
 
     def _handle_waypoint_arrival(self):
-        """waypoint 도착 시 상태 처리 (다중 배송 지원)"""
+        """waypoint 도착 시 상태 처리 (다중 배송 지원, 서비스 시간 적용)"""
         if not self.route:
             return
             
@@ -316,33 +329,86 @@ class Drone:
         current_waypoint_idx = self._waypoint_index
         self._waypoint_index += 1
         
+        # Skip service time for first waypoint (depot start) to avoid waiting at depot
+        if current_waypoint_idx == 0:
+            # First waypoint is the start position - just continue flying
+            if not self.route:
+                self._complete_delivery_route()
+            return
+        
         # 다중 배송 모드: waypoint_order_map 기반 처리
         if self.route_waypoint_order_map and current_waypoint_idx in self.route_waypoint_order_map:
             order, visit_type = self.route_waypoint_order_map[current_waypoint_idx]
             
             if visit_type == "store":
-                print(f"✈️  Drone {self.id}: Picked up Order {order.id} at STORE")
-                order.status = OrderStatus.IN_PROGRESS
-                if self.status == DroneStatus.FLYING:
-                    self.status = DroneStatus.DELIVERING
+                # Start pickup service time
+                pickup_time = getattr(config, 'PICKUP_SERVICE_TIME', 60.0)
+                self._service_time_remaining = pickup_time
+                self._current_service_type = "store"
+                self.status = DroneStatus.PICKING_UP
+                print(f"✈️  Drone {self.id}: Arrived at STORE for Order {order.id} - picking up ({pickup_time:.0f}s)")
                     
             elif visit_type == "customer":
-                print(f"📦 Drone {self.id}: Delivered Order {order.id} to CUSTOMER")
+                # Start delivery service time
+                delivery_time = getattr(config, 'DELIVERY_SERVICE_TIME', 60.0)
+                self._service_time_remaining = delivery_time
+                self._current_service_type = "customer"
+                self.status = DroneStatus.DROPPING_OFF
+                print(f"📦 Drone {self.id}: Arrived at CUSTOMER for Order {order.id} - delivering ({delivery_time:.0f}s)")
+        else:
+            # 단일 배송 모드 (기존 로직 with service time)
+            if self.status == DroneStatus.FLYING:
+                # Start pickup service time
+                pickup_time = getattr(config, 'PICKUP_SERVICE_TIME', 60.0)
+                self._service_time_remaining = pickup_time
+                self._current_service_type = "store"
+                self.status = DroneStatus.PICKING_UP
+                print(f"✈️  Drone {self.id}: Arrived at STORE - picking up ({pickup_time:.0f}s)")
+            elif self.status == DroneStatus.DELIVERING:
+                # Start delivery service time
+                delivery_time = getattr(config, 'DELIVERY_SERVICE_TIME', 60.0)
+                self._service_time_remaining = delivery_time
+                self._current_service_type = "customer"
+                self.status = DroneStatus.DROPPING_OFF
+                print(f"📦 Drone {self.id}: Arrived at CUSTOMER - delivering ({delivery_time:.0f}s)")
+        
+        # 경로의 마지막 목적지에 도착했는지 확인 (단, 서비스 중이 아닐 때만)
+        if not self.route and self._service_time_remaining <= 0:
+            self._complete_delivery_route()
+    
+    def _complete_service(self):
+        """Complete the current service operation (pickup or delivery)"""
+        current_waypoint_idx = self._waypoint_index - 1  # We already incremented in _handle_waypoint_arrival
+        
+        # 다중 배송 모드: waypoint_order_map 기반 처리
+        if self.route_waypoint_order_map and current_waypoint_idx in self.route_waypoint_order_map:
+            order, visit_type = self.route_waypoint_order_map[current_waypoint_idx]
+            
+            if visit_type == "store":
+                print(f"✅ Drone {self.id}: Pickup complete for Order {order.id}")
+                order.status = OrderStatus.IN_PROGRESS
+                self.status = DroneStatus.DELIVERING  # Continue to next waypoint
+                    
+            elif visit_type == "customer":
+                print(f"✅ Drone {self.id}: Delivery complete for Order {order.id}")
                 order.status = OrderStatus.COMPLETED
                 if order in self.current_orders:
                     self.current_orders.remove(order)
+                self.status = DroneStatus.FLYING  # Continue to next waypoint or returning
         else:
-            # 단일 배송 모드 (기존 로직)
-            if self.status == DroneStatus.FLYING:
+            # 단일 배송 모드
+            if self._current_service_type == "store":
+                print(f"✅ Drone {self.id}: Pickup complete")
                 self.status = DroneStatus.DELIVERING
-                print(f"✈️  Drone {self.id}: Arrived at STORE")
-            elif self.status == DroneStatus.DELIVERING:
-                self.status = DroneStatus.RETURNING
-                print(f"📦 Drone {self.id}: Delivered to CUSTOMER")
+            elif self._current_service_type == "customer":
+                print(f"✅ Drone {self.id}: Delivery complete")
                 if self.current_order:
                     self.current_order.status = OrderStatus.COMPLETED
+                self.status = DroneStatus.RETURNING
         
-        # 경로의 마지막 목적지에 도착했는지 확인
+        self._current_service_type = None
+        
+        # 경로의 마지막 목적지였는지 확인
         if not self.route:
             self._complete_delivery_route()
 
@@ -441,9 +507,12 @@ class Map:
         self.depots.append(depot)
 
     def build_tree(self):
+        """Build spatial index tree and ID-to-index lookup for buildings."""
         polys = []
-        for building in self.buildings:
+        self.building_id_to_index = {}  # Maps building.id to list index
+        for idx, building in enumerate(self.buildings):
             polys.append(building.inner_poly)
+            self.building_id_to_index[building.id] = idx
         self.tree = STRtree(polys)
 
     def get_building_containing_point(self, point: Position) -> Optional[Building]:

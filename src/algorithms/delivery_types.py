@@ -51,7 +51,10 @@ class Route:
         return self.get_total_distance_estimate() * config.BATTERY_SAFETY_MARGIN
 
     def get_estimated_arrival_times(self) -> Dict[int, float]:
-        """Return estimated arrival time per order (customer), including service times."""
+        """Return estimated arrival time per order (customer), including service times.
+        
+        Uses PICKUP_SERVICE_TIME for store visits and DELIVERY_SERVICE_TIME for customer visits.
+        """
         arrival_times: Dict[int, float] = {}
 
         if not self.start_position:
@@ -59,12 +62,21 @@ class Route:
 
         current_time = self.start_time
         current_pos = self.start_position
+        
+        # Get service times from config (with fallbacks)
+        pickup_service_time = getattr(config, 'PICKUP_SERVICE_TIME', config.SERVICE_TIME_PER_STOP)
+        delivery_service_time = getattr(config, 'DELIVERY_SERVICE_TIME', config.SERVICE_TIME_PER_STOP)
 
         for visit in self.visits:
             travel_distance = current_pos.distance_to(visit.position)
             travel_time = travel_distance / config.DRONE_SPEED if config.DRONE_SPEED > 0 else 0.0
             current_time += travel_time
-            current_time += config.SERVICE_TIME_PER_STOP
+            
+            # Apply appropriate service time based on visit type
+            if visit.visit_type == "store":
+                current_time += pickup_service_time
+            else:  # customer
+                current_time += delivery_service_time
 
             current_pos = visit.position
 

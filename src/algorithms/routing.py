@@ -245,6 +245,9 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
         For each building, finds the portion of the segment that overlaps with the
         building's 2D footprint, then checks if the segment's height at that portion
         is within the building's vertical bounds.
+        
+        Note: excluded_building_ids and building_ids_to_check use building.id values,
+        which are converted to list indices for comparison with tree query results.
         """
         line_2d = LineString([(p1.x, p1.z), (p2.x, p2.z)])
         
@@ -254,14 +257,26 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
         dy = p2.y - p1.y
         seg_len_2d = math.sqrt(dx*dx + dz*dz)
         
-        building_ids: set = set(self.map.tree.query(line_2d))
-        if building_ids_to_check is not None:
-            building_ids = building_ids & building_ids_to_check
-        if excluded_building_ids is not None:
-            building_ids -= excluded_building_ids
+        # Tree query returns list indices, not building IDs
+        building_indices: set = set(self.map.tree.query(line_2d))
+        
+        # Convert building IDs to indices for filtering
+        id_to_idx = getattr(self.map, 'building_id_to_index', None)
+        
+        if building_ids_to_check is not None and id_to_idx:
+            # Convert IDs to indices
+            indices_to_check = {id_to_idx.get(bid) for bid in building_ids_to_check if bid is not None}
+            indices_to_check.discard(None)
+            building_indices = building_indices & indices_to_check
+        
+        if excluded_building_ids is not None and id_to_idx:
+            # Convert IDs to indices
+            excluded_indices = {id_to_idx.get(bid) for bid in excluded_building_ids if bid is not None}
+            excluded_indices.discard(None)
+            building_indices -= excluded_indices
 
-        for building_id in building_ids:
-            building: Building = self.map.buildings[building_id]
+        for building_idx in building_indices:
+            building: Building = self.map.buildings[building_idx]
             b_y_min, b_y_max = building._vertical_bounds()
             
             poly = building.inner_poly

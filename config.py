@@ -52,20 +52,26 @@ DEPOT_SAFETY_MARGIN = 30.0  # Safety distance from buildings (in meters)
 # Simulation configuration
 SIMULATION_SPEED = 5  # Real-time multiplier
 ORDER_GENERATION_RATE = 0.0003  # Orders per second (lower to avoid overload)
-MAX_ORDER_DELAY = 300  # Maximum seconds to wait for order
+MAX_ORDER_DELAY = 3600  # Maximum seconds to wait for order
 ROUTE_RETRY_INTERVAL = 60.0  # Seconds to wait before retrying failed routes
 ROUTE_RETRY_MAX_ATTEMPTS = 3  # How many times to retry routing an order
 ROUTE_CONNECTIVITY_CACHE_TTL = 300.0  # seconds to keep failed depot-route connectivity info
 
-# Drone configuration
-DRONE_SPEED = 30  # m/s
+# Drone configuration (realistic delivery drone parameters)
+# Reference: DJI FlyCart 30, Wing drones, typical commercial delivery drones
+DRONE_SPEED = 15  # m/s (~54 km/h, typical cruising speed for delivery drones with payload)
+DRONE_VERTICAL_SPEED = 5  # m/s (vertical ascent/descent speed)
 DRONE_CAPACITY = 3  # Number of orders per drone (multi-delivery)
-DRONE_BATTERY_LIFE = 25000 # m
-DRONE_CHARGING_SPEED = 0.00455 # /s
-DRONE_BATTERY_CAPACITY = 2 # kWh
+DRONE_MAX_PAYLOAD = 5  # kg (maximum payload weight)
+DRONE_BATTERY_LIFE = 15000  # m (15km range, conservative with payload, ~25min flight time)
+DRONE_CHARGING_TIME = 3600  # seconds (1 hour for full charge, fast charging)
+DRONE_CHARGING_SPEED = 1.0 / DRONE_CHARGING_TIME  # Battery fraction per second
+DRONE_BATTERY_CAPACITY = 4  # kWh (typical lithium battery pack for delivery drones)
 
-# Multi-delivery configuration
-SERVICE_TIME_PER_STOP = 30.0  # Time spent at each stop (seconds)
+# Service time configuration (pickup and delivery operations)
+PICKUP_SERVICE_TIME = 60.0  # Time to pick up food at store (seconds) - 1 minute
+DELIVERY_SERVICE_TIME = 60.0  # Time to deliver food to customer (seconds) - 1 minute
+SERVICE_TIME_PER_STOP = 60.0  # Default service time per stop (seconds) for route planning
 CUSTOMER_MAX_WAIT_TIME = 600.0  # Maximum customer wait time (seconds)
 BATTERY_SAFETY_MARGIN = 1.2  # Battery safety margin (20% reserve)
 

@@ -152,7 +152,8 @@ class SimulationEngine:
         
         The drone's update_position() method handles:
         - 3D movement along route waypoints
-        - Automatic state transitions (FLYING -> DELIVERING -> RETURNING -> IDLE)
+        - Automatic state transitions (FLYING -> PICKING_UP -> DELIVERING -> DROPPING_OFF -> RETURNING -> IDLE)
+        - Service time waits at stores (pickup) and customers (delivery)
         - Horizontal and vertical speed considerations
         
         Args:
@@ -162,7 +163,7 @@ class SimulationEngine:
         if drone.status == DroneStatus.IDLE:
             # Reset collision status when idle
             drone.collision_status = 'none'
-            # if drone.battery_level == 1: return
+            # Charge battery while idle
             battery_level = min(1, drone.battery_level + delta_time * config.DRONE_CHARGING_SPEED)
             self.stats['charging_cost'] += (battery_level - drone.battery_level) * config.DRONE_BATTERY_CAPACITY * config.CHARGING_COST
             drone.battery_level = battery_level
@@ -171,6 +172,7 @@ class SimulationEngine:
         else:
             # Update drone's 3D position and state
             # The Drone.update_position() method in entities.py handles all 3D logic
+            # including service time waits at stores and customers
             drone.update_position(delta_time)
     
     def _check_drone_collision(self, drone: Drone):

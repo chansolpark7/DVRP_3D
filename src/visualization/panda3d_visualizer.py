@@ -25,7 +25,7 @@ from panda3d.core import (
 from direct.gui.OnscreenText import OnscreenText
 
 import config
-from src.models.entities import Map, Building, Depot, Drone, EntityType, Position
+from src.models.entities import Map, Building, Depot, Drone, DroneStatus, EntityType, Position
 
 
 # Configure Panda3D before ShowBase initialization
@@ -415,6 +415,7 @@ class Panda3DVisualizer(ShowBase):
         self.drone_nodes: Dict[int, NodePath] = {}
         self.drone_labels: Dict[int, NodePath] = {}
         self.drone_routes: Dict[int, NodePath] = {}  # Route visualization lines
+        self.drone_colors: Dict[int, Vec4] = {}  # Track current drone colors for updates
         self.failure_markers: Dict[int, NodePath] = {}
         
         # Route visualization settings
@@ -636,9 +637,24 @@ class Panda3DVisualizer(ShowBase):
         self.sun_light = sun_np
         
     def _format_drone_label(self, drone: Drone) -> str:
-        """Format drone label text"""
+        """Format drone label text with status and service time info"""
         battery_pct = max(0.0, min(1.0, getattr(drone, 'battery_level', 0.0))) * 100
-        return f"D{drone.id}: {battery_pct:.0f}%"
+        
+        # Show service status if applicable (using ASCII text instead of emojis for Panda3D compatibility)
+        service_time = getattr(drone, '_service_time_remaining', 0.0)
+        
+        if drone.status == DroneStatus.PICKING_UP and service_time > 0:
+            return f"D{drone.id}: {battery_pct:.0f}%\n[PICKUP] {service_time:.0f}s"
+        elif drone.status == DroneStatus.DROPPING_OFF and service_time > 0:
+            return f"D{drone.id}: {battery_pct:.0f}%\n[DELIVER] {service_time:.0f}s"
+        elif drone.status == DroneStatus.FLYING:
+            return f"D{drone.id}: {battery_pct:.0f}%\n[FLYING]"
+        elif drone.status == DroneStatus.DELIVERING:
+            return f"D{drone.id}: {battery_pct:.0f}%\n[DELIVERY]"
+        elif drone.status == DroneStatus.RETURNING:
+            return f"D{drone.id}: {battery_pct:.0f}%\n[RETURN]"
+        else:
+            return f"D{drone.id}: {battery_pct:.0f}%"
     
     def _create_route_line(self, drone: Drone, color: Vec4 = None) -> Optional[NodePath]:
         """Create a line visualization for drone's route
@@ -871,44 +887,71 @@ class Panda3DVisualizer(ShowBase):
             
         active_drone_ids = set()
         
-        color_normal = Vec4(1, 1, 0, 1)   # Yellow
-        color_collision = Vec4(1, 0, 0, 1)  # Red
+        color_normal = Vec4(1, 1, 0, 1)   # Yellow - flying
+        color_collision = Vec4(1, 0, 0, 1)  # Red - collision
+        color_pickup = Vec4(0, 1, 0.5, 1)   # Cyan/Teal - picking up at store
+        color_dropoff = Vec4(1, 0.5, 0, 1)  # Orange - delivering to customer
+        color_returning = Vec4(0.5, 0.5, 1, 1)  # Light blue - returning
         
         for drone in drones:
             active_drone_ids.add(drone.id)
             
-            # Get collision status
+            # Get collision status (for color only, not visibility)
             collision_status = getattr(drone, 'collision_status', 'none')
-            is_visible = (collision_status != 'destination_entry')
+            # Always show drone, even when inside buildings
+            is_visible = True
             
-            # Determine color
+            # Determine color based on status and collision
             if collision_status == 'accidental':
                 drone_color = color_collision
+            elif drone.status == DroneStatus.PICKING_UP:
+                drone_color = color_pickup
+            elif drone.status == DroneStatus.DROPPING_OFF:
+                drone_color = color_dropoff
+            elif drone.status == DroneStatus.RETURNING:
+                drone_color = color_returning
             else:
                 drone_color = color_normal
             
             # Convert drone position to Panda3D coords
             panda_pos = _sim_pos_to_panda3d(drone.position)
+            
+            # Check if color changed (need to recreate geometry)
+            current_color = self.drone_colors.get(drone.id)
+            if current_color is None:
+                color_changed = True
+            else:
+                # Compare as tuples since Vec4 comparison can be unreliable
+                current_tuple = (current_color[0], current_color[1], current_color[2])
+                new_tuple = (drone_color[0], drone_color[1], drone_color[2])
+                color_changed = current_tuple != new_tuple
                 
-            # Create new drone node if it doesn't exist
-            if drone.id not in self.drone_nodes:
+            # Create new drone node if it doesn't exist or color changed
+            if drone.id not in self.drone_nodes or color_changed:
+                # Remove old node if exists
+                if drone.id in self.drone_nodes:
+                    self.drone_nodes[drone.id].removeNode()
+                
                 # Drone size scales with average building size
                 drone_radius = 1.0 * self.entity_scale
                 geom_node = _create_sphere_geom(drone_radius, 12, 8, drone_color)
                 drone_node = self.scene_root.attachNewNode(geom_node)
                 drone_node.setPos(panda_pos[0], panda_pos[1], panda_pos[2])
                 self.drone_nodes[drone.id] = drone_node
+                # Store color as tuple to avoid reference issues
+                self.drone_colors[drone.id] = Vec4(drone_color[0], drone_color[1], drone_color[2], drone_color[3])
                 
-                # Create label (simulation coords with height offset)
-                label_offset = 3 * self.entity_scale
-                label_scale = 5.0 * self.entity_scale  # Larger labels for visibility
-                label = self._create_3d_text(
-                    self._format_drone_label(drone),
-                    (drone.position.x, drone.position.y + label_offset, drone.position.z),
-                    scale=label_scale,
-                    color=Vec4(0, 0, 0, 1)
-                )
-                self.drone_labels[drone.id] = label
+                # Create or update label (simulation coords with height offset)
+                if drone.id not in self.drone_labels:
+                    label_offset = 3 * self.entity_scale
+                    label_scale = 5.0 * self.entity_scale  # Larger labels for visibility
+                    label = self._create_3d_text(
+                        self._format_drone_label(drone),
+                        (drone.position.x, drone.position.y + label_offset, drone.position.z),
+                        scale=label_scale,
+                        color=Vec4(0, 0, 0, 1)
+                    )
+                    self.drone_labels[drone.id] = label
             else:
                 # Update existing drone position
                 drone_node = self.drone_nodes[drone.id]
@@ -948,8 +991,8 @@ class Panda3DVisualizer(ShowBase):
                     self.drone_routes[drone.id].removeNode()
                     del self.drone_routes[drone.id]
                 
-                # Create new route line if drone has a route
-                if drone.route and len(drone.route) > 0 and is_visible:
+                # Create new route line if drone has a route (always visible)
+                if drone.route and len(drone.route) > 0:
                     route_np = self._create_route_line(drone)
                     if route_np:
                         self.drone_routes[drone.id] = route_np
@@ -968,6 +1011,9 @@ class Panda3DVisualizer(ShowBase):
             if drone_id in self.drone_routes:
                 self.drone_routes[drone_id].removeNode()
                 del self.drone_routes[drone_id]
+            
+            if drone_id in self.drone_colors:
+                del self.drone_colors[drone_id]
                 
     def clear_drones(self):
         """Clear all drone entities from the scene"""
@@ -981,6 +1027,7 @@ class Panda3DVisualizer(ShowBase):
         self.drone_nodes.clear()
         self.drone_labels.clear()
         self.drone_routes.clear()
+        self.drone_colors.clear()
         self.clear_failure_markers()
         
     def update_failure_markers(self, failure_events: List[Dict]):
