@@ -114,18 +114,21 @@ MAP_DATA_DIR = PROJECT_ROOT / "src" / "map"
 
 BUILDINGS_DATA_CONFIG = {
     "terrain_contour_paths": [
-        MAP_DATA_DIR / "국가기본공간정보_포스텍_이동_효자_SK뷰" / "NF_L_F01000_L_F01000_000000.shp",
+        MAP_DATA_DIR / "국가기본공간정보_서울_영등포구" / "NF_L_F01000_L_F01000_000000.shp",
+        #MAP_DATA_DIR / "국가기본공간정보_포스텍_이동_효자_SK뷰" / "NF_L_F01000_L_F01000_000000.shp",
     ],
     "spot_elevation_paths": [
-        MAP_DATA_DIR / "국가기본공간정보_포스텍_이동_효자_SK뷰" / "NF_P_F02000_P_F02000_000000.shp",
+        MAP_DATA_DIR / "국가기본공간정보_서울_영등포구" / "NF_P_F02000_P_F02000_000000.shp",
+        #MAP_DATA_DIR / "국가기본공간정보_포스텍_이동_효자_SK뷰" / "NF_P_F02000_P_F02000_000000.shp",
     ],
     "building_paths": [
-        MAP_DATA_DIR / "F_FAC_BUILDING_경북_포항시_남구_북구" / "F_FAC_BUILDING_47111_202507.shp",
-        MAP_DATA_DIR / "F_FAC_BUILDING_경북_포항시_남구_북구" / "F_FAC_BUILDING_47113_202507.shp",
+        MAP_DATA_DIR / "F_FAC_BUILDING_서울_영등포구" / "F_FAC_BUILDING_11560_202512.shp",
+        #MAP_DATA_DIR / "F_FAC_BUILDING_경북_포항시_남구_북구" / "F_FAC_BUILDING_47111_202507.shp",
+        #MAP_DATA_DIR / "F_FAC_BUILDING_경북_포항시_남구_북구" / "F_FAC_BUILDING_47113_202507.shp",
     ],
-    "output_csv_filename": MAP_DATA_DIR / "postech_building_list.csv",
-    "output_2d_filename": MAP_DATA_DIR / "postech_2d_map.png",
-    "output_3d_filename": MAP_DATA_DIR / "postech_3d_map.png",
+    "output_csv_filename": MAP_DATA_DIR / "seoul_building_list.csv",
+    "output_2d_filename": MAP_DATA_DIR / "seoul_2d_map.png",
+    "output_3d_filename": MAP_DATA_DIR / "seoul_3d_map.png",
     "output_geojson_filename": MAP_DATA_DIR / "buildings.geojson",
     "dpi_2d": 300,
     "dpi_3d": 300,
