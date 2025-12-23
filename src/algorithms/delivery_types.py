@@ -1,5 +1,5 @@
 """
-Data structures shared by multi-delivery routing strategies.
+Data structures for delivery routing.
 """
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import config
-from ...models.entities import Drone, Order, Position
+from ..models.entities import Drone, Order, Position
 
 
 @dataclass

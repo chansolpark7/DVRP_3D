@@ -4,15 +4,13 @@ Order management system for dynamic order generation and depot assignment (3D)
 
 import random
 import time
-import math
 from typing import List, Dict, Optional, Tuple, Callable
-# (수정) DroneStatus 임포트
 from ..models.entities import (
     Order, Depot, Drone, OrderStatus, DroneStatus, Position, Store, Customer
 )
 from .clustering import MixedClustering
-from .routing import DroneRouteOptimizer, SimpleRouting, MultiLevelAStarRouting, RouteValidator
-from .multi_delivery.insertion_heuristic import InsertionHeuristicStrategy
+from .routing import MultiLevelAStarRouting
+from .insertion_strategy import InsertionStrategy
 import config
 
 
@@ -72,111 +70,29 @@ class OrderGenerator:
         return orders
 
 
-class DepotSelector:
-    
-    def __init__(self, map_obj):
-        self.map = map_obj
-        self.clustering_algorithm = MixedClustering()
-    
-    def select_best_depot(self, order: Order) -> Optional[Depot]:
-        if not self.map.depots:
-            return None
-        
-        scored = self.get_scored_depots(order)
-        return scored[0][0] if scored else None
-
-    def get_scored_depots(self, order: Order) -> List[Tuple[Depot, float]]:
-        """Return depots sorted by suitability score (desc)."""
-        results = []
-        for depot in self.map.depots:
-            score = self._calculate_depot_score(depot, order)
-            results.append((depot, score))
-        # Sort high score first
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results
-    
-    def _calculate_depot_score(self, depot: Depot, order: Order) -> float:
-        available_drones = depot.get_available_drones()
-        if not available_drones:
-            return 0.0
-        
-        depot_to_store_distance = depot.get_center().distance_to(order.store_position)
-        
-        store_to_customer_distance = order.get_distance()
-        
-        total_distance = depot_to_store_distance + store_to_customer_distance
-        
-        customer_to_depot_distance = order.customer_position.distance_to(depot.get_center())
-        
-        complete_trip_distance = total_distance + customer_to_depot_distance
-        
-        drone_bonus = len(available_drones) * 10
-        
-        distance_score = max(0, 1000 - complete_trip_distance)
-        
-        battery_score = 100
-        
-        total_score = distance_score + drone_bonus + battery_score
-        
-        return total_score
-    
-    def get_depot_assignment_metrics(self, orders: List[Order]) -> Dict[int, Dict]:
-        depot_stats = {}
-        
-        for depot in self.map.depots:
-            depot_stats[depot.id] = {
-                'total_orders': 0,
-                'available_drones': len(depot.get_available_drones()),
-                'total_drones': len(depot.drones),
-                'avg_distance': 0.0,
-                'total_distance': 0.0
-            }
-        
-        for order in orders:
-            if order.assigned_drone and order.assigned_drone.depot:
-                depot_id = order.assigned_drone.depot.id
-                if depot_id in depot_stats:
-                    depot_stats[depot_id]['total_orders'] += 1
-                    
-                    depot = order.assigned_drone.depot
-                    distance = (depot.position.distance_to(order.store_position) + 
-                                order.store_position.distance_to(order.customer_position) +
-                                order.customer_position.distance_to(depot.position))
-                    
-                    depot_stats[depot_id]['total_distance'] += distance
-        
-        for depot_id, stats in depot_stats.items():
-            if stats['total_orders'] > 0:
-                stats['avg_distance'] = stats['total_distance'] / stats['total_orders']
-        
-        return depot_stats
-
-
 class OrderManager:
+    """Unified order management with integrated insertion strategy.
+    
+    Handles all drone assignments through a single InsertionStrategy that
+    fairly compares inserting into existing routes vs starting new routes.
+    """
     
     def __init__(self, map_obj, seed: Optional[int] = None):
         self.map = map_obj
         self.orders: List[Order] = []
         self.completed_orders: List[Order] = []
         self.order_generator = OrderGenerator(map_obj, seed=seed)
-        self.depot_selector = DepotSelector(map_obj)
         self.route_connectivity_cache: Dict[Tuple[int, int, int], Dict[str, float]] = {}
         self.connectivity_cache_ttl = getattr(config, "ROUTE_CONNECTIVITY_CACHE_TTL", 300.0)
         
+        # Initialize routing algorithm
         print("  Initializing 3D routing...")
-        self.route_optimizer = DroneRouteOptimizer(MultiLevelAStarRouting(map_obj, k_levels=3))
+        self.routing_algorithm = MultiLevelAStarRouting(map_obj, k_levels=3)
         
-        # 다중 배송 전략 초기화
-        self.use_multi_delivery = config.DRONE_CAPACITY > 1
-        if self.use_multi_delivery:
-            print(f"  Multi-delivery mode enabled (capacity: {config.DRONE_CAPACITY})")
-            self.insertion_strategy = InsertionHeuristicStrategy(self.route_optimizer, map_obj)
-        else:
-            print("  Single-delivery mode")
-            self.insertion_strategy = None
+        # Initialize unified insertion strategy
+        print(f"  Unified insertion strategy enabled (drone capacity: {config.DRONE_CAPACITY})")
+        self.insertion_strategy = InsertionStrategy(self.routing_algorithm, map_obj)
         
-        # 시각화 설정
-        self.first_route_visualized = False
         self.route_failure_handlers: List[Callable[[Order, str], None]] = []
 
     def register_route_failure_handler(self, handler: Callable[[Order, str], None]):
@@ -185,6 +101,7 @@ class OrderManager:
             self.route_failure_handlers.append(handler)
     
     def process_orders(self, current_time: float) -> List[Order]:
+        """Process orders: generate new ones and assign pending ones."""
         new_order = self.order_generator.generate_random_order(current_time)
         if new_order:
             self.orders.append(new_order)
@@ -193,7 +110,7 @@ class OrderManager:
         new_completed = []
         for order in self.orders[:]:
             if order.status == OrderStatus.PENDING:
-                self._assign_order_to_depot(order, current_time)
+                self._assign_order(order, current_time)
             elif order.status == OrderStatus.COMPLETED:
                 self.orders.remove(order)
                 self.completed_orders.append(order)
@@ -213,7 +130,7 @@ class OrderManager:
             return
         if current_time is None:
             current_time = time.time()
-        self._assign_order_to_depot(order, current_time)
+        self._assign_order(order, current_time)
 
     def _notify_route_failure(self, order: Order, reason: str):
         for handler in self.route_failure_handlers:
@@ -222,101 +139,24 @@ class OrderManager:
             except Exception as exc:
                 print(f"Route failure handler error: {exc}")
     
-    def _assign_order_to_depot(self, order: Order, current_time: Optional[float] = None):
-        if current_time is None:
-            current_time = time.time()
+    def _assign_order(self, order: Order, current_time: float):
+        """Assign order using unified insertion strategy.
         
-        # 다중 배송 모드: 삽입 휴리스틱 우선 시도
-        if self.use_multi_delivery and self.insertion_strategy:
-            success = self.insertion_strategy.assign_order(order, current_time)
-            if success:
-                print(f"✓ Order {order.id} assigned via multi-delivery insertion heuristic")
-                return
-            # 실패 시 기존 단일 배송 로직으로 폴백
-            print(f"⚠️ Order {order.id}: Multi-delivery insertion failed, trying single-delivery fallback")
+        The strategy automatically compares:
+        - Inserting into existing drone routes (cost delta)
+        - Starting new routes with idle drones (absolute cost)
         
-        candidates = self.depot_selector.get_scored_depots(order)
-        if not candidates:
-            return
-
-        for depot, score in candidates:
-            if self._is_cached_unreachable(depot, order, current_time):
-                continue
-
-            assigned_drone = depot.assign_drone(order)
-            if not assigned_drone:
-                continue
-
-            order.assigned_drone = assigned_drone
-            order.status = OrderStatus.ASSIGNED
-
-            try:
-                # 시각화 옵션 결정
-                should_visualize = False
-                if config.VISUALIZE_ALL_ROUTES:
-                    should_visualize = True
-                elif config.VISUALIZE_FIRST_ROUTE and not self.first_route_visualized:
-                    should_visualize = True
-                    self.first_route_visualized = True
-                    print(f"\n{'='*60}\n📊 Visualizing first delivery route\n{'='*60}")
-                
-                route = self.route_optimizer.optimize_delivery_route(assigned_drone, order, visualize=should_visualize)
-                
-                # (수정) 경로 탐색 실패 시 다른 depot 시도
-                if not route or len(route) < 2:
-                    reason = "fail to find route"
-                    print(f"❌ Order {order.id}: Route calculation FAILED (Depot {depot.id})")
-                    self._release_drone(assigned_drone, order)
-                    self._notify_route_failure(order, reason)
-                    self._mark_connectivity(depot, order, reachable=False, current_time=current_time)
-                    continue
-
-                is_valid, reason, message = RouteValidator.validate_route_feasibility(route, assigned_drone)
-                if not is_valid:
-                    print(f"❌ Order {order.id}: {message}")
-                    if reason == "time_limit":
-                        order.status = OrderStatus.CANCELLED
-                        self._release_drone(assigned_drone, order)
-                        self._notify_route_failure(order, "time_limit")
-                        if order in self.orders:
-                            self.orders.remove(order)
-                        return
-                    else:
-                        self._release_drone(assigned_drone, order)
-                        order.status = OrderStatus.PENDING
-                        self._notify_route_failure(order, reason or "route_invalid")
-                        self._mark_connectivity(depot, order, reachable=False, current_time=current_time)
-                        continue
-
-                # 성공
-                self._mark_connectivity(depot, order, reachable=True, current_time=current_time)
-                assigned_drone.start_delivery(route)
-                print(f"✓ Order {order.id} assigned to Depot {depot.id}, Drone {assigned_drone.id}")
-                return
-
-            except Exception as e:
-                reason = "exception"
-                print(f"Failed to set route for order {order.id}: {e}")
-                import traceback
-                traceback.print_exc()
-                self._release_drone(assigned_drone, order)
-                order.status = OrderStatus.PENDING
-                self._notify_route_failure(order, reason)
-                self._mark_connectivity(depot, order, reachable=False, current_time=current_time)
-                continue
-
-        # 모든 depot 시도 후 실패하면 주문은 PENDING 상태로 남음
-        order.status = OrderStatus.PENDING
-        order.assigned_drone = None
-
-    def _release_drone(self, drone: Drone, order: Order):
-        """Reset drone/order linkage after failed assignment."""
-        if not drone:
-            return
-        drone.current_order = None
-        drone.status = DroneStatus.IDLE
-        drone.route = None
-        order.assigned_drone = None
+        And selects the best option.
+        """
+        success = self.insertion_strategy.assign_order(order, current_time)
+        
+        if success:
+            print(f"✓ Order {order.id} assigned successfully")
+        else:
+            # Assignment failed - order remains PENDING for retry
+            order.status = OrderStatus.PENDING
+            order.assigned_drone = None
+            self._notify_route_failure(order, "no_valid_assignment")
     
     def get_order_statistics(self) -> Dict:
         total_orders = len(self.orders) + len(self.completed_orders)
@@ -355,7 +195,7 @@ class OrderManager:
         pending_orders = [o for o in self.orders if o.status == OrderStatus.PENDING]
         
         for order in pending_orders:
-            self._assign_order_to_depot(order, current_time)
+            self._assign_order(order, current_time)
         
         print(f"Assigned {len(pending_orders)} pending orders with routes")
     
@@ -379,19 +219,6 @@ class OrderManager:
             }
         
         return depot_info
-
-    def _mark_connectivity(self, depot: Depot, order: Order, reachable: bool, current_time: float):
-        key = (depot.id, order.store_building_id or -1, order.customer_building_id or -1)
-        self.route_connectivity_cache[key] = {"reachable": reachable, "timestamp": current_time}
-
-    def _is_cached_unreachable(self, depot: Depot, order: Order, current_time: float) -> bool:
-        key = (depot.id, order.store_building_id or -1, order.customer_building_id or -1)
-        record = self.route_connectivity_cache.get(key)
-        if not record:
-            return False
-        if current_time - record["timestamp"] > self.connectivity_cache_ttl:
-            return False
-        return record.get("reachable") is False
 
 
 class OrderValidator:

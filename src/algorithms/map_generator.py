@@ -5,11 +5,14 @@ Map generation algorithms for creating urban environments (3D)
 import random
 import math
 from typing import List, Tuple, Optional
+from shapely.geometry import Polygon, box
 from ..models.entities import Building, Position, EntityType, Map, Depot, Drone, DroneStatus, Store, Customer
 import config
 
 # Import floor height from config
 FLOOR_HEIGHT = config.FLOOR_HEIGHT  # Height of each floor in meters
+INNER_MARGIN = getattr(config, 'BUILDING_INNER_POLY_MARGIN', 0.1)
+OUTER_MARGIN = getattr(config, 'BUILDING_OUTER_POLY_MARGIN', 0.4)
 
 
 class MapGenerator:
@@ -52,12 +55,35 @@ class MapGenerator:
             )
             
             if position:
+                # Create polygons for collision detection
+                half_w = width / 2
+                half_d = depth / 2
+                cx, cz = position.x, position.z
+                
+                # Inner polygon (slightly smaller for collision detection)
+                inner_poly = box(
+                    cx - half_w + INNER_MARGIN,
+                    cz - half_d + INNER_MARGIN,
+                    cx + half_w - INNER_MARGIN,
+                    cz + half_d - INNER_MARGIN
+                )
+                
+                # Outer polygon (slightly larger for path planning nodes)
+                outer_poly = box(
+                    cx - half_w - OUTER_MARGIN,
+                    cz - half_d - OUTER_MARGIN,
+                    cx + half_w + OUTER_MARGIN,
+                    cz + half_d + OUTER_MARGIN
+                )
+                
                 building = Building(
                     id=i,
                     position=position,
                     width=width,
                     height=height,
-                    depth=depth
+                    depth=depth,
+                    inner_poly=inner_poly,
+                    outer_poly=outer_poly
                 )
                 buildings.append(building)
                 self.map.add_building(building)

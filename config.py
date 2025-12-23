@@ -6,13 +6,13 @@ from pathlib import Path
 RUN_VISUALIZER = True
 SIMULATION_DELTA_TIME = 0.05 # s
 if not RUN_VISUALIZER:
-    SIMULATION_TIME = 3600 # s
+    SIMULATION_TIME = 200 # s
 
 # Map configuration
 MAP_SEED = 123
 ORDER_SEED = 456
 NODE_OFFSET = 5.0
-MAP_SOURCE = "real"  # "real" to use GeoJSON footprints, "random" for synthetic test map
+MAP_SOURCE = "random"  # "real" to use GeoJSON footprints, "random" for synthetic test map
 MAP_GEOJSON_PATH = "src/map/buildings.geojson"  # Override if your data lives elsewhere
 MAP_BUILDING_LIMIT = None  # Set to int to cap imported buildings for testing
 
@@ -23,7 +23,7 @@ MAP_DEPTH = 2000  # Z-axis (depth, same as MAP_HEIGHT)
 MAX_MAP_HEIGHT = 500  # Y-axis (maximum altitude for drones)
 
 # Building configuration (in meters for realistic scale)
-TOTAL_BUILDINGS = 100
+TOTAL_BUILDINGS = 200
 BUILDING_MIN_SIZE = 10   # Minimum width/depth (meters) - small building
 BUILDING_MAX_SIZE = 40   # Maximum width/depth (meters) - medium building
 BUILDING_MIN_HEIGHT = 10  # Minimum building height (meters) - ~3 floors
@@ -44,13 +44,13 @@ CUSTOMER_RATIO = 0.5  # 50% of buildings are customers
 # Remaining buildings (20%) will be empty buildings
 
 # Depot configuration
-TOTAL_DEPOTS = 5
-DRONES_PER_DEPOT = 5
+TOTAL_DEPOTS = 2
+DRONES_PER_DEPOT = 2
 DEPOT_SIZE = 20
 DEPOT_SAFETY_MARGIN = 30.0  # Safety distance from buildings (in meters)
 
 # Simulation configuration
-SIMULATION_SPEED = 1.0  # Real-time multiplier
+SIMULATION_SPEED = 5  # Real-time multiplier
 ORDER_GENERATION_RATE = 0.0003  # Orders per second (lower to avoid overload)
 MAX_ORDER_DELAY = 300  # Maximum seconds to wait for order
 ROUTE_RETRY_INTERVAL = 60.0  # Seconds to wait before retrying failed routes

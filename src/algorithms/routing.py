@@ -240,10 +240,19 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
     def _segment_collides_3d(self, p1: Position, p2: Position,
                                excluded_building_ids: Optional[Set[Optional[int]]] = None,
                                building_ids_to_check: Optional[Set[int]] = None) -> bool:
-        """Check if 3D segment intersects any building footprint (polygon) within overlapping height."""
-
+        """Check if 3D segment actually passes through any building volume.
+        
+        For each building, finds the portion of the segment that overlaps with the
+        building's 2D footprint, then checks if the segment's height at that portion
+        is within the building's vertical bounds.
+        """
         line_2d = LineString([(p1.x, p1.z), (p2.x, p2.z)])
-        seg_y_min, seg_y_max = min(p1.y, p2.y), max(p1.y, p2.y)
+        
+        # Calculate segment direction for height interpolation
+        dx = p2.x - p1.x
+        dz = p2.z - p1.z
+        dy = p2.y - p1.y
+        seg_len_2d = math.sqrt(dx*dx + dz*dz)
         
         building_ids: set = set(self.map.tree.query(line_2d))
         if building_ids_to_check is not None:
@@ -254,37 +263,176 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
         for building_id in building_ids:
             building: Building = self.map.buildings[building_id]
             b_y_min, b_y_max = building._vertical_bounds()
-            if seg_y_max < b_y_min or seg_y_min > b_y_max:
-                continue
-
+            
             poly = building.inner_poly
-            if poly is not None and line_2d.intersects(poly):
-                return True
+            if poly is None:
+                continue
+            
+            # Get the intersection of the 2D line with the polygon
+            intersection = line_2d.intersection(poly)
+            if intersection.is_empty:
+                continue
+            
+            # Handle different intersection geometry types
+            if intersection.geom_type == 'Point':
+                # Single point intersection - get t parameter and check height
+                t = self._get_t_for_point(p1, dx, dz, seg_len_2d, intersection.x, intersection.y)
+                y_at_t = p1.y + dy * t
+                if b_y_min <= y_at_t <= b_y_max:
+                    return True
+                    
+            elif intersection.geom_type == 'LineString':
+                # Line segment intersection - check if segment height range overlaps building
+                coords = list(intersection.coords)
+                if len(coords) >= 2:
+                    # Get t values for entry and exit points
+                    t_entry = self._get_t_for_point(p1, dx, dz, seg_len_2d, coords[0][0], coords[0][1])
+                    t_exit = self._get_t_for_point(p1, dx, dz, seg_len_2d, coords[-1][0], coords[-1][1])
+                    
+                    # Calculate y values at entry and exit
+                    y_entry = p1.y + dy * t_entry
+                    y_exit = p1.y + dy * t_exit
+                    
+                    # Get the height range of the segment within the building footprint
+                    seg_y_min = min(y_entry, y_exit)
+                    seg_y_max = max(y_entry, y_exit)
+                    
+                    # Check if height ranges overlap
+                    if not (seg_y_max < b_y_min or seg_y_min > b_y_max):
+                        return True
+                        
+            elif intersection.geom_type == 'MultiLineString':
+                # Multiple line segments - check each one
+                for geom in intersection.geoms:
+                    coords = list(geom.coords)
+                    if len(coords) >= 2:
+                        t_entry = self._get_t_for_point(p1, dx, dz, seg_len_2d, coords[0][0], coords[0][1])
+                        t_exit = self._get_t_for_point(p1, dx, dz, seg_len_2d, coords[-1][0], coords[-1][1])
+                        y_entry = p1.y + dy * t_entry
+                        y_exit = p1.y + dy * t_exit
+                        seg_y_min = min(y_entry, y_exit)
+                        seg_y_max = max(y_entry, y_exit)
+                        if not (seg_y_max < b_y_min or seg_y_min > b_y_max):
+                            return True
+                            
+            elif intersection.geom_type == 'MultiPoint':
+                for geom in intersection.geoms:
+                    t = self._get_t_for_point(p1, dx, dz, seg_len_2d, geom.x, geom.y)
+                    y_at_t = p1.y + dy * t
+                    if b_y_min <= y_at_t <= b_y_max:
+                        return True
+            
+            elif intersection.geom_type == 'Polygon':
+                # Segment passes through polygon interior - use boundary
+                boundary = intersection.exterior
+                coords = list(boundary.coords)
+                if len(coords) >= 2:
+                    # Find min and max t along the segment within the polygon
+                    t_values = [self._get_t_for_point(p1, dx, dz, seg_len_2d, c[0], c[1]) for c in coords]
+                    t_min, t_max = min(t_values), max(t_values)
+                    y_at_min = p1.y + dy * t_min
+                    y_at_max = p1.y + dy * t_max
+                    seg_y_min = min(y_at_min, y_at_max)
+                    seg_y_max = max(y_at_min, y_at_max)
+                    if not (seg_y_max < b_y_min or seg_y_min > b_y_max):
+                        return True
+            
+            elif intersection.geom_type == 'GeometryCollection':
+                # Handle mixed geometry types
+                for geom in intersection.geoms:
+                    if geom.geom_type == 'LineString':
+                        coords = list(geom.coords)
+                        if len(coords) >= 2:
+                            t_entry = self._get_t_for_point(p1, dx, dz, seg_len_2d, coords[0][0], coords[0][1])
+                            t_exit = self._get_t_for_point(p1, dx, dz, seg_len_2d, coords[-1][0], coords[-1][1])
+                            y_entry = p1.y + dy * t_entry
+                            y_exit = p1.y + dy * t_exit
+                            seg_y_min = min(y_entry, y_exit)
+                            seg_y_max = max(y_entry, y_exit)
+                            if not (seg_y_max < b_y_min or seg_y_min > b_y_max):
+                                return True
+                    elif geom.geom_type == 'Point':
+                        t = self._get_t_for_point(p1, dx, dz, seg_len_2d, geom.x, geom.y)
+                        y_at_t = p1.y + dy * t
+                        if b_y_min <= y_at_t <= b_y_max:
+                            return True
 
         return False
+    
+    def _get_t_for_point(self, p1: Position, dx: float, dz: float, seg_len_2d: float, 
+                         px: float, pz: float) -> float:
+        """Calculate parameter t (0 to 1) for a point along the 2D projection of segment.
+        
+        t=0 corresponds to p1, t=1 corresponds to p2.
+        """
+        if seg_len_2d < 1e-9:
+            return 0.0
+        
+        # Project the point onto the line direction
+        vec_x = px - p1.x
+        vec_z = pz - p1.z
+        
+        # t = dot(vec, dir) / len^2 = dot(vec, dir/len) / len
+        t = (vec_x * dx + vec_z * dz) / (seg_len_2d * seg_len_2d)
+        return max(0.0, min(1.0, t))
 
     def _find_path_core(self, start: Position, end: Position) -> List[Position]:
-        """기준선 기반 필터링된 그래프에서 A* 경로를 찾아 노드 리스트(튜플)를 반환합니다."""
+        """기준선 기반 필터링된 그래프에서 A* 경로를 찾아 노드 리스트(튜플)를 반환합니다.
+        
+        시작/끝점이 건물 내부에 있는 경우:
+        1. 해당 건물의 외부 꼭짓점도 노드에 포함
+        2. 시작점 → 시작 건물 꼭짓점, 끝 건물 꼭짓점 → 끝점 연결만 허용
+        3. 다른 모든 경로는 건물 충돌 검사 적용
+        """
         if start == end:
             return [(start.x, start.y, start.z)]
 
         nodes: List[Position] = [start, end]
+        
+        # 시작/끝 건물 ID
+        start_building_id = start.building_id
+        end_building_id = end.building_id
 
-        # 도착점이 속한 건물 ID 찾기 (충돌 예외 처리용)
-
-        # 관련 건물 필터링 (시작 건물은 여기서 필터링 안 함, 어차피 충돌 무시됨)
-        relevant_buildings = self._filter_relevant_buildings(start, end, end_building_id=end.building_id)
+        # 관련 건물 필터링 (시작/끝 건물 제외)
+        relevant_buildings = self._filter_relevant_buildings(
+            start, end, 
+            start_building_id=start_building_id,
+            end_building_id=end_building_id
+        )
         relevant_building_ids = set()
-        # print(f"       CORE: Found {len(relevant_buildings)} relevant buildings.")
 
         # 관련 건물의 노드 추가 (오프셋 적용됨)
         for building in relevant_buildings:
             relevant_building_ids.add(building.id)
-            # 꼭짓점 노드 추가
-            vertices = self._get_building_vertices_3d(building) # 오프셋 적용된 노드
+            vertices = self._get_building_vertices_3d(building)
             for vertex in vertices:
                 if vertex in nodes: raise
                 nodes.append(vertex)
+        
+        # 시작/끝 건물의 꼭짓점도 추가 (건물 내부에서 외부로 나가기 위해)
+        start_building_vertices_start_idx = len(nodes)
+        if start_building_id is not None:
+            start_building = self.map.buildings[start_building_id]
+            vertices = self._get_building_vertices_3d(start_building)
+            for vertex in vertices:
+                if vertex not in nodes:
+                    nodes.append(vertex)
+        start_building_vertices_end_idx = len(nodes)
+        
+        end_building_vertices_start_idx = len(nodes)
+        if end_building_id is not None and end_building_id != start_building_id:
+            end_building = self.map.buildings[end_building_id]
+            vertices = self._get_building_vertices_3d(end_building)
+            for vertex in vertices:
+                if vertex not in nodes:
+                    nodes.append(vertex)
+        end_building_vertices_end_idx = len(nodes)
+        
+        # 충돌 검사에 시작/끝 건물도 포함
+        if start_building_id is not None:
+            relevant_building_ids.add(start_building_id)
+        if end_building_id is not None:
+            relevant_building_ids.add(end_building_id)
 
         n = len(nodes)
         dist = [-1] * n
@@ -298,20 +446,46 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
             if visited[x] and d < dist[x]: raise
             visited[x] = True
 
-            if x == end: break
+            if x == 1: break  # 끝점(index 1)에 도달
             if dist[x] != d: continue
+            
             for y in range(n):
                 if x == y: continue
                 p1 = nodes[x]
                 p2 = nodes[y]
                 d_ = self._euclidean_distance_3d(nodes[x], nodes[y]) + d
                 if dist[y] != -1 and d_ >= dist[y]: continue
-                if self._segment_collides_3d(
-                    p1,
-                    p2,
-                    {p1.building_id, p2.building_id},
-                    building_ids_to_check=relevant_building_ids):
-                    continue
+                
+                # 특수 케이스 체크
+                is_start_to_start_building = (x == 0 and start_building_vertices_start_idx <= y < start_building_vertices_end_idx)
+                is_end_building_to_end = (y == 1 and end_building_vertices_start_idx <= x < end_building_vertices_end_idx)
+                is_same_building_direct = (x == 0 and y == 1 and start_building_id == end_building_id and start_building_id is not None)
+                is_any_to_end = (y == 1)  # 끝점으로 가는 모든 경로
+                is_start_to_any = (x == 0)  # 시작점에서 나가는 모든 경로
+                
+                if is_start_to_start_building or is_end_building_to_end or is_same_building_direct:
+                    # 시작/끝 건물 내 이동은 항상 허용 (충돌 검사 생략)
+                    pass
+                elif is_any_to_end:
+                    # 끝점으로 들어가는 경우: 끝 건물만 제외하고 다른 건물은 충돌 검사
+                    excluded = {end_building_id} if end_building_id is not None else set()
+                    if self._segment_collides_3d(p1, p2, excluded, building_ids_to_check=relevant_building_ids):
+                        continue
+                elif is_start_to_any:
+                    # 시작점에서 나가는 경우: 시작 건물만 제외하고 다른 건물은 충돌 검사
+                    excluded = {start_building_id} if start_building_id is not None else set()
+                    if self._segment_collides_3d(p1, p2, excluded, building_ids_to_check=relevant_building_ids):
+                        continue
+                else:
+                    # 일반 충돌 검사
+                    excluded = set()
+                    
+                    # 같은 건물의 꼭짓점 간 이동은 해당 건물 제외
+                    if p1.building_id == p2.building_id and p1.building_id is not None:
+                        excluded.add(p1.building_id)
+                    
+                    if self._segment_collides_3d(p1, p2, excluded, building_ids_to_check=relevant_building_ids):
+                        continue
 
                 dist[y] = d_
                 connection[y] = x
@@ -463,8 +637,17 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
 
     def calculate_route_rec(self, start: Position, end: Position, depth=0) -> List[Position]:
         if depth > 100: return None
-
-        is_direct_path_safe = not self._segment_collides_3d(start, end, excluded_building_ids={start.building_id, end.building_id})
+        
+        # 직접 경로 안전 검사
+        # 시작/끝 건물은 제외 (드론이 건물 내부로 들어가거나 나가는 것은 허용)
+        if start.building_id is not None and start.building_id == end.building_id:
+            # 같은 건물 내 이동은 직접 경로 허용
+            is_direct_path_safe = True
+        else:
+            # 시작/끝 건물을 제외하고 다른 건물만 충돌 검사
+            excluded = {start.building_id, end.building_id} - {None}
+            is_direct_path_safe = not self._segment_collides_3d(start, end, excluded_building_ids=excluded)
+        
         if is_direct_path_safe:
             return [start, end]
 
@@ -472,16 +655,15 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
         if not route or len(route) < 2:
             return None
 
-        #print(route)
         full_route = [route[0]]
         for i in range(len(route) - 1):
             a = route[i]
             b = route[i+1]
-            is_step_safe = not self._segment_collides_3d(a, b, excluded_building_ids={a.building_id, b.building_id, end.building_id})
+            # 각 단계도 건물 충돌 검사 (해당 노드의 건물만 제외)
+            is_step_safe = not self._segment_collides_3d(a, b, excluded_building_ids={a.building_id, b.building_id})
             if is_step_safe:
                 full_route.append(b)
             else:
-                #print(a, b)
                 extended_route = self.calculate_route_rec(a, b, depth + 1)
                 if not extended_route: return None
 
@@ -496,7 +678,7 @@ class MultiLevelAStarRouting(RoutingAlgorithm):
         segment_targets = waypoints + [end] # 거쳐갈 목표 지점들
 
         for p in full_route + segment_targets:
-            building = self.map.get_building_containing_point(start)
+            building = self.map.get_building_containing_point(p)
             p.building_id = building.id if building else None
 
         current_segment_start = start
