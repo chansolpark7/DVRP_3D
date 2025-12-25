@@ -6,7 +6,7 @@ from pathlib import Path
 # ============================================
 # SIMULATION MODE: "drone" or "motorbike"
 # ============================================
-SIMULATION_MODE = "motorbike"  # Change to "motorbike" for baseline comparison
+SIMULATION_MODE = "drone"  # Change to "motorbike" for baseline comparison
 
 RUN_VISUALIZER = True
 SIMULATION_DELTA_TIME = 0.05 # s
@@ -73,6 +73,9 @@ DRONE_BATTERY_LIFE = 15000  # m (15km range, conservative with payload, ~25min f
 DRONE_CHARGING_TIME = 3600  # seconds (1 hour for full charge, fast charging)
 DRONE_CHARGING_SPEED = 1.0 / DRONE_CHARGING_TIME  # Battery fraction per second
 DRONE_BATTERY_CAPACITY = 4  # kWh (typical lithium battery pack for delivery drones)
+DRONE_SIZE = 1 # m
+DRONE_TIME_HORIZON = 5
+ORCA_DISTANCE = 15
 
 # Service time configuration (pickup and delivery operations) - for DRONE
 PICKUP_SERVICE_TIME = 60.0  # Time to pick up food at store (seconds) - 1 minute

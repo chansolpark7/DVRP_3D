@@ -155,34 +155,38 @@ class SimulationEngine:
     
     def _update_drones(self, delta_time: float):
         """Update all vehicles (drones or motorbikes) in the simulation"""
+        vehicles = []
         for depot in self.map.depots:
             for vehicle in depot.drones:  # 'drones' holds either drones or motorbikes
-                if vehicle.status != DroneStatus.IDLE:
-                    # Only count distance when actually moving (not during service time)
-                    service_time = getattr(vehicle, '_service_time_remaining', 0.0)
-                    is_actually_moving = (
-                        vehicle.status not in [DroneStatus.PICKING_UP, DroneStatus.DROPPING_OFF] and
-                        service_time <= 0 and
-                        vehicle.route is not None and len(vehicle.route) > 0
-                    )
+                vehicles.append(vehicle)
+
+        for vehicle in vehicles:
+            if vehicle.status != DroneStatus.IDLE:
+                # Only count distance when actually moving (not during service time)
+                service_time = getattr(vehicle, '_service_time_remaining', 0.0)
+                is_actually_moving = (
+                    vehicle.status not in [DroneStatus.PICKING_UP, DroneStatus.DROPPING_OFF] and
+                    service_time <= 0 and
+                    vehicle.route is not None and len(vehicle.route) > 0
+                )
+                
+                if is_actually_moving:
+                    distance_moved = vehicle.speed * delta_time
                     
-                    if is_actually_moving:
-                        distance_moved = vehicle.speed * delta_time
-                        
-                        if self.simulation_mode == "motorbike":
-                            self.stats['total_vehicle_distance'] += distance_moved
-                            # Calculate fuel cost (won per km)
-                            fuel_cost_per_m = getattr(config, 'MOTORBIKE_FUEL_COST_PER_KM', 150) / 1000
-                            self.stats['fuel_cost'] += distance_moved * fuel_cost_per_m
-                        else:
-                            self.stats['total_drone_distance'] += distance_moved
-                
-                self._update_drone(vehicle, delta_time)
-                
-                # Check for building collisions and update collision status
-                self._check_drone_collision(vehicle)
+                    if self.simulation_mode == "motorbike":
+                        self.stats['total_vehicle_distance'] += distance_moved
+                        # Calculate fuel cost (won per km)
+                        fuel_cost_per_m = getattr(config, 'MOTORBIKE_FUEL_COST_PER_KM', 150) / 1000
+                        self.stats['fuel_cost'] += distance_moved * fuel_cost_per_m
+                    else:
+                        self.stats['total_drone_distance'] += distance_moved
+            
+            self._update_drone(vehicle, delta_time, vehicles)
+            
+            # Check for building collisions and update collision status
+            self._check_drone_collision(vehicle)
     
-    def _update_drone(self, vehicle: Vehicle, delta_time: float):
+    def _update_drone(self, vehicle: Vehicle, delta_time: float, others: list[Drone]):
         """Update individual vehicle (drone or motorbike) position and state
         
         The vehicle's update_position() method handles:
@@ -218,7 +222,7 @@ class SimulationEngine:
                 self.stats['labor_cost'] += delta_time * labor_cost_per_sec
             
             # Update vehicle's position and state
-            vehicle.update_position(delta_time)
+            vehicle.update_position(delta_time, others)
     
     def _check_drone_collision(self, drone: Drone):
         """Check if drone is colliding with a building and update collision status

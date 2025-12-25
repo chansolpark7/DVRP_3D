@@ -11,6 +11,8 @@ from shapely.geometry import Polygon, Point, box
 from shapely.strtree import STRtree
 import config
 
+EPSILON = 1e-6
+
 class EntityType(Enum):
     STORE = "store"
     CUSTOMER = "customer"
@@ -88,6 +90,62 @@ class Position:
     def copy(self) -> 'Position':
         return Position(self.x, self.y, self.z)
 
+@dataclass
+class Vector:
+    x: float
+    y: float
+
+    def __add__(self, other) -> 'Vector':
+        if isinstance(other, Vector):
+            return Vector(self.x + other.x, self.y + other.y)
+        elif isinstance(other, tuple) and len(other) == 2:
+            return Vector(self.x + other[0], self.y + other[1])
+        else:
+            return NotImplemented
+
+    def __sub__(self, other) -> 'Vector':
+        if isinstance(other, Vector):
+            return Vector(self.x - other.x, self.y - other.y)
+        elif isinstance(other, tuple) and len(other) == 2:
+            return Vector(self.x - other[0], self.y - other[1])
+        else:
+            return NotImplemented
+
+    def __mul__(self, other) -> 'Vector':
+        if isinstance(other, (int, float)):
+            return Vector(self.x * other, self.y * other)
+        else:
+            return NotImplemented
+
+    def __truediv__(self, other) -> 'Vector':
+        if isinstance(other, (int, float)):
+            return Vector(self.x / other, self.y / other)
+        else:
+            return NotImplemented
+
+    def length(self) -> float:
+        return (self.x ** 2 + self.y ** 2) ** 0.5
+
+    def dot(self, other) -> float:
+        if isinstance(other, Vector):
+            return self.x * other.x + self.y * other.y
+        else:
+            return NotImplemented
+
+    def det(self, other) -> float:
+        if isinstance(other, Vector):
+            return self.x * other.y - self.y * other.x
+
+    def norm(self) -> 'Vector':
+        return self / self.length()
+
+    def __getitem__(self, x):
+        if x == 0: return self.x
+        elif x == 1: return self.y
+        else: raise IndexError
+
+    def __repr__(self):
+        return f'({self.x}, {self.y})'
 
 @dataclass
 class Building:
@@ -234,6 +292,7 @@ class Drone:
     """Represents a delivery drone in 3D space"""
     id: int
     position: Position  # 3D position (x, y, z)
+    vel: Vector # 2D Vector
     depot: Depot
     status: DroneStatus = DroneStatus.IDLE
     current_order: Optional['Order'] = None
@@ -271,12 +330,41 @@ class Drone:
             self.route = None
             self.status = DroneStatus.IDLE
     
-    def update_position(self, dt: float):
+    def update_position(self, dt: float, others: list['Drone']):
         """
         경로에 따라 드론 위치를 업데이트하고, 각 경유지에 도달할 때마다
         상태를 올바르게 변경합니다. (3D 이동 지원, 다중 배송 지원)
         서비스 시간이 있으면 해당 시간 동안 대기합니다.
         """
+        def solve_linear_program(lines: list[tuple[Vector, Vector]], v_cur: Vector, t: Vector):
+            random.shuffle(lines)
+            v = t
+            for i, (p, n) in enumerate(lines):
+                m = Vector(n[1], -n[0])
+                if (v - p).dot(n) >= -EPSILON: continue
+
+                min_k = float('-inf')
+                max_k = float('inf')
+                for p_, n_ in lines[:i]:
+                    if abs(n.det(n_)) < EPSILON:
+                        if (p_ - p).dot(n_) > EPSILON:
+                            return v_cur * 0.5
+                        else:
+                            continue
+                    k = (p_ - p).dot(n_) / n_.dot(m)
+                    if n.det(n_) > 0:
+                        max_k = min(max_k, k)
+                    else:
+                        min_k = max(min_k, k)
+
+                if min_k > max_k + EPSILON:
+                    return v_cur * 0.5
+
+                cen_k = (t - p).det(n) / (m.length()**2)
+                v = p + m * max(min_k, min(max_k, cen_k))
+            
+            return v
+
         # Handle service time waiting (pickup at store or delivery to customer)
         if self._service_time_remaining > 0:
             self._service_time_remaining -= dt
@@ -299,26 +387,110 @@ class Drone:
 
         # 이미 목표 지점에 있거나 매우 가까운 경우 즉시 다음 waypoint로
         if distance < 0.1:
+            self.vel = Vector(0, 0)
             self._handle_waypoint_arrival()
             return
         
         # 수평 및 수직 이동 속도 계산
-        effective_speed = self.speed
-        if distance > 0:
-            # 전체 이동 거리 기준으로 이동
-            move_distance = effective_speed * dt
-            self.battery_level -= move_distance / config.DRONE_BATTERY_LIFE
-            
-            if distance < move_distance:
-                # 목표 지점에 도착
-                self.position = target.copy()
-                self._handle_waypoint_arrival()
+        move_distance = self.speed * dt
+        self.battery_level -= move_distance / config.DRONE_BATTERY_LIFE
+        if distance < move_distance:
+            self.position = target.copy()
+            self.vel = Vector(0, 0)
+            self._handle_waypoint_arrival()
+        else:
+            v_pref = Vector(direction.x, direction.y) * self.speed / distance
+            lines: List[Tuple[Vector, Vector]] = []
+            for agent in others:
+                if self is agent: continue
+
+                line = self.compute_orca_line(dt, agent)
+                if line:
+                    lines.append(line)
+            bias = 0.9
+            v_opt = v_pref * (1.0 - bias) + self.vel * bias
+            v_new = solve_linear_program(lines, self.vel, v_opt)
+            if v_new.length() > self.speed:
+                v_new = v_new.norm() * self.speed
+            self.vel = v_new
+
+            self.position.x += self.vel.x * dt
+            self.position.y += self.vel.y * dt
+            self.position.z += self.speed * dt * direction.z / distance
+
+    def compute_orca_line(self, dt: float, other: 'Drone') -> Optional[Tuple[Vector, Vector]]:
+        rel_pos = Vector(other.position.x - self.position.x, other.position.y - self.position.y)
+        rel_vel = self.vel - other.vel
+
+        dist = rel_pos.length()
+        R = 2 * config.DRONE_SIZE
+
+        if dist > config.ORCA_DISTANCE:
+            return None
+
+        if dist < R:
+            w = rel_vel - rel_pos / dt
+            w_len = w.length()
+            if w_len < EPSILON:
+                return None
+
+            n = w.norm()
+            u = n * (R / dt - w_len)
+
+            point_on_line = self.vel + u * 0.5
+            return (point_on_line, n)
+
+        if rel_vel.length() < EPSILON:
+            return None
+
+        alpha = math.asin(R / dist)
+        cos_theta = max(-1, min(1, rel_pos.dot(rel_vel) / (dist * rel_vel.length())))
+        theta = math.acos(cos_theta)
+
+        will_collide = (
+            (theta - alpha < -EPSILON) and
+            (
+                (rel_vel * config.DRONE_TIME_HORIZON - rel_pos).length() < R or
+                (rel_vel.length() * config.DRONE_TIME_HORIZON >= dist * math.cos(alpha))
+            )
+        )
+
+        if will_collide:
+            c = math.cos(alpha)
+            s = math.sin(alpha)
+            if rel_pos.det(rel_vel) < 0:
+                s = -s
+
+            v = Vector(
+                c * rel_pos[0] - s * rel_pos[1],
+                s * rel_pos[0] + c * rel_pos[1]
+            )
+
+            v = v * (math.cos(alpha - theta) * rel_vel.length() / v.length())
+
+            u = v - rel_vel
+            n = u.norm()
+
+            point_on_line = self.vel + u * 0.5
+            return (point_on_line, n)
+        else:
+            u = rel_vel - rel_pos / config.DRONE_TIME_HORIZON
+
+            if u.length() < EPSILON:
+                c = math.cos(alpha)
+                s = math.sin(alpha)
+                v = Vector(
+                    c * rel_pos[0] - s * rel_pos[1],
+                    s * rel_pos[0] + c * rel_pos[1]
+                )
+                u = v - rel_vel
             else:
-                # 목표 지점을 향해 이동합니다.
-                ratio = move_distance / distance
-                self.position.x += direction.x * ratio
-                self.position.y += direction.y * ratio
-                self.position.z += direction.z * ratio
+                u = u * (R / config.DRONE_TIME_HORIZON / u.length())
+
+            n = u.norm()
+            point_on_line = rel_pos / config.DRONE_TIME_HORIZON + u * 0.5
+
+            return (point_on_line, n)
 
     def _handle_waypoint_arrival(self):
         """waypoint 도착 시 상태 처리 (다중 배송 지원, 서비스 시간 적용)"""
@@ -533,7 +705,7 @@ class Motorbike:
         clamped_z = max(margin, min(map_depth - margin, z))
         return clamped_x, clamped_z
     
-    def update_position(self, dt: float):
+    def update_position(self, dt: float, others: list['Motorbike']):
         """Update motorbike position along route (ground-level 2D movement)."""
         # Handle service time waiting
         if self._service_time_remaining > 0:

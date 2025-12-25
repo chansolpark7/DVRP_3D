@@ -6,7 +6,7 @@ import random
 import math
 from typing import List, Tuple, Optional
 from shapely.geometry import Polygon, box
-from ..models.entities import Building, Position, EntityType, Map, Depot, Drone, Motorbike, DroneStatus, Store, Customer
+from ..models.entities import Building, Position, Vector, EntityType, Map, Depot, Drone, Motorbike, DroneStatus, Store, Customer
 import config
 
 # Import floor height from config
@@ -514,6 +514,7 @@ class DepotPlacer:
                     vehicle = Drone(
                         id=f"drone_{i}_{j}",
                         position=depot.get_center().copy(),
+                        vel=Vector(0, 0),
                         depot=depot,
                         status=DroneStatus.IDLE
                     )
